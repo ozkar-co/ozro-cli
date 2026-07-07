@@ -1,0 +1,7 @@
+# Cache de índices GRF
+.cache/
+
+# Referencias extraídas masivas (usar _ref/icons con pocos archivos)
+data/custom/_ref/icons/
+
+
