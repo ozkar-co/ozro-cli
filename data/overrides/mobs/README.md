@@ -14,22 +14,24 @@ Name each PNG by either:
 Overrides never replace a mob that already has a real extracted sprite; they only
 fill in the gaps.
 
-## PNG guidelines
+## Image guidelines
 
-- Transparent background (PNG with alpha).
+- Accepted formats: `.png`, `.gif`, `.webp`, `.jpg`. For animated `.gif`/`.webp`
+  the builder uses the **first frame** (frame 0) and flattens it into the atlas.
+- Prefer a transparent background (alpha or a transparent GIF index).
 - Roughly square; the builder fits them inside 160x160.
 - A tight crop of the entity looks best next to the 2D sprites.
 
 ## Current 3D models to cover
 
-One PNG per row covers all the listed mobs:
+One image per row covers all the listed mobs (extension can be `.png`/`.gif`/`.webp`/`.jpg`):
 
 | File to add | Entity | Model | Mobs covered |
 |-------------|--------|-------|--------------|
-| `1285.png`  | Archer Guardian  | `Aguardian90_8.gr2` | 4  |
-| `1286.png`  | Knight Guardian  | `Kguardian90_7.gr2` | 4  |
-| `1287.png`  | Soldier Guardian | `Sguardian90_9.gr2` | 1  |
-| `1288.png`  | Emperium         | `Empelium90_0.gr2`  | 2  |
-| `1324.png`  | Treasure Chest   | `TREASUREBOX_2.gr2` | 69 |
+| `1285.*`  | Archer Guardian  | `Aguardian90_8.gr2` | 4  |
+| `1286.*`  | Knight Guardian  | `Kguardian90_7.gr2` | 4  |
+| `1287.*`  | Soldier Guardian | `Sguardian90_9.gr2` | 1  |
+| `1288.*`  | Emperium         | `Empelium90_0.gr2`  | 2  |
+| `1324.*`  | Treasure Chest   | `TREASUREBOX_2.gr2` | 69 |
 
 After adding the PNGs, run `npm run assets` from the `ozro-cli` root to rebuild.

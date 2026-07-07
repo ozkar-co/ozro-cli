@@ -175,7 +175,7 @@ function modelKey(jobNames, id) {
 async function applyMobOverrides({ overridesPath, mobs, jobNames, mobBuffers, report }) {
   if (!overridesPath || !existsSync(overridesPath)) return 0;
 
-  const files = readdirSync(overridesPath).filter((f) => /\.png$/i.test(f));
+  const files = readdirSync(overridesPath).filter((f) => /\.(png|gif|webp|jpe?g)$/i.test(f));
   if (!files.length) return 0;
 
   let covered = 0;
@@ -185,7 +185,8 @@ async function applyMobOverrides({ overridesPath, mobs, jobNames, mobBuffers, re
     const key = basename(file, extname(file)).toLowerCase();
     let png;
     try {
-      png = await sharp(join(overridesPath, file))
+      // For animated inputs (e.g. .gif) take the first frame (page 0).
+      png = await sharp(join(overridesPath, file), { page: 0 })
         .ensureAlpha()
         .resize(160, 160, { fit: 'inside', withoutEnlargement: true })
         .png()
