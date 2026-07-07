@@ -1,0 +1,7 @@
+{
+  "clientPath": "/home/oz/Downloads/OzRo",
+  "dataIni": "data.ini",
+  "itemInfo": "System/itemInfo.lua",
+  "mobDb": "/home/oz/Code/rathena/db/re/mob_db.yml",
+  "outputPath": "/home/oz/Code/ozro-backup/assets"
+}

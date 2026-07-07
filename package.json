@@ -1,0 +1,9 @@
+{
+  "name": "ozro-cli",
+  "private": true,
+  "scripts": {
+    "assets": "npm run build:assets --prefix tools/grf",
+    "assets:test": "npm run build:assets:test --prefix tools/grf",
+    "grf": "npm run grf --prefix tools/grf --"
+  }
+}
