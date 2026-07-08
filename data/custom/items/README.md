@@ -38,12 +38,12 @@ data/
 
 4. **Server-side**: definir items en `rathena/db/import/item_db.yml` con los IDs de arriba.
 
-5. **Repack `ozro.grf`** con GRF Editor:
-   - Añadir `data/custom/items/texture/...` al GRF en las rutas correctas
-   - Copiar entradas de `itemInfo_custom.lua` al `System/itemInfo.lua` del cliente (o overlay en GRF si aplica)
+5. **Repack `ozro.grf`** con GRF Editor (Windows):
+   - `npm run client:iteminfo` (genera `data/System/itemInfo_v5.lua`)
+   - Añadir archivos según [docs/client-install.md](../../docs/client-install.md)
    - `ozro.grf` tiene prioridad 1 en `data.ini`
 
-6. **Regenerar assets web** tras añadir items al itemInfo del cliente:
+6. **Regenerar assets web** (opcional):
    ```bash
    cd ozro-cli && npm run assets
    ```

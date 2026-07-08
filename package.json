@@ -4,6 +4,7 @@
   "scripts": {
     "assets": "npm run build:assets --prefix tools/grf",
     "assets:test": "npm run build:assets:test --prefix tools/grf",
-    "grf": "npm run grf --prefix tools/grf --"
+    "grf": "npm run grf --prefix tools/grf --",
+    "client:iteminfo": "npm run iteminfo --prefix tools/client"
   }
 }

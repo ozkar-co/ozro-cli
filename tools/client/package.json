@@ -1,0 +1,9 @@
+{
+  "name": "@ozro/client-tools",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "iteminfo": "node bin/iteminfo.js"
+  }
+}

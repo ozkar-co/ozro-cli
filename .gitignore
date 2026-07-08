@@ -4,4 +4,7 @@
 # Referencias extraídas masivas (usar _ref/icons con pocos archivos)
 data/custom/_ref/icons/
 
+# Generado por npm run client:iteminfo (incluir en ozro.grf al empaquetar)
+data/System/itemInfo_v5.lua
+
 
