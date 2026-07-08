@@ -1,47 +1,65 @@
 -- OzRo custom item entries — merge into client System/itemInfo.lua
 -- Resource names must match BMP filenames under texture/유저인터페이스/item/
+-- Display names and descriptions in Spanish (custom vs vanilla).
 
 tbl_custom = {
 	[35001] = {
-		unidentifiedDisplayName = "OzRo Platinum Coin",
+		unidentifiedDisplayName = "Moneda de Platino OzRo",
 		unidentifiedResourceName = "ozro_platinum_coin",
-		unidentifiedDescriptionName = { "A platinum coin minted in OzRagnarok." },
-		identifiedDisplayName = "OzRo Platinum Coin",
+		unidentifiedDescriptionName = { "Una moneda de platino acuñada en OzRagnarok." },
+		identifiedDisplayName = "Moneda de Platino OzRo",
 		identifiedResourceName = "ozro_platinum_coin",
-		identifiedDescriptionName = { "A platinum coin minted in OzRagnarok." },
+		identifiedDescriptionName = { "Una moneda de platino acuñada en OzRagnarok." },
 		slotCount = 0,
 		ClassNum = 0,
 		costume = false
 	},
 	[35002] = {
-		unidentifiedDisplayName = "OzRo Gold Coin",
+		unidentifiedDisplayName = "Moneda de Oro OzRo",
 		unidentifiedResourceName = "ozro_gold_coin",
-		unidentifiedDescriptionName = { "A gold coin minted in OzRagnarok." },
-		identifiedDisplayName = "OzRo Gold Coin",
+		unidentifiedDescriptionName = { "Una moneda de oro acuñada en OzRagnarok." },
+		identifiedDisplayName = "Moneda de Oro OzRo",
 		identifiedResourceName = "ozro_gold_coin",
-		identifiedDescriptionName = { "A gold coin minted in OzRagnarok." },
+		identifiedDescriptionName = { "Una moneda de oro acuñada en OzRagnarok." },
 		slotCount = 0,
 		ClassNum = 0,
 		costume = false
 	},
 	[35003] = {
-		unidentifiedDisplayName = "OzRo Silver Coin",
+		unidentifiedDisplayName = "Moneda de Plata OzRo",
 		unidentifiedResourceName = "ozro_silver_coin",
-		unidentifiedDescriptionName = { "A silver coin minted in OzRagnarok." },
-		identifiedDisplayName = "OzRo Silver Coin",
+		unidentifiedDescriptionName = { "Una moneda de plata acuñada en OzRagnarok." },
+		identifiedDisplayName = "Moneda de Plata OzRo",
 		identifiedResourceName = "ozro_silver_coin",
-		identifiedDescriptionName = { "A silver coin minted in OzRagnarok." },
+		identifiedDescriptionName = { "Una moneda de plata acuñada en OzRagnarok." },
 		slotCount = 0,
 		ClassNum = 0,
 		costume = false
 	},
 	[35004] = {
-		unidentifiedDisplayName = "OzRo Bronze Coin",
+		unidentifiedDisplayName = "Moneda de Bronce OzRo",
 		unidentifiedResourceName = "ozro_bronze_coin",
-		unidentifiedDescriptionName = { "A bronze coin minted in OzRagnarok." },
-		identifiedDisplayName = "OzRo Bronze Coin",
+		unidentifiedDescriptionName = { "Una moneda de bronce acuñada en OzRagnarok." },
+		identifiedDisplayName = "Moneda de Bronce OzRo",
 		identifiedResourceName = "ozro_bronze_coin",
-		identifiedDescriptionName = { "A bronze coin minted in OzRagnarok." },
+		identifiedDescriptionName = { "Una moneda de bronce acuñada en OzRagnarok." },
+		slotCount = 0,
+		ClassNum = 0,
+		costume = false
+	},
+	[35005] = {
+		unidentifiedDisplayName = "Alma de MVP",
+		unidentifiedResourceName = "영혼의조각",
+		unidentifiedDescriptionName = {
+			"Fragmento de la esencia de un MVP derrotado.",
+			"Se usa para invocar monstruos poderosos."
+		},
+		identifiedDisplayName = "Alma de MVP",
+		identifiedResourceName = "영혼의조각",
+		identifiedDescriptionName = {
+			"Fragmento de la esencia de un MVP derrotado.",
+			"Se usa para invocar monstruos poderosos."
+		},
 		slotCount = 0,
 		ClassNum = 0,
 		costume = false
