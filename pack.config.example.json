@@ -1,0 +1,9 @@
+{
+  "exePath": "release/ozro_patched.exe",
+  "outputExeName": "OzRo.exe",
+  "grfPath": "release/ozro.grf",
+  "grf": "ozro.grf",
+  "systemFiles": [
+    "itemInfo_EN.lua"
+  ]
+}

@@ -3,7 +3,16 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "iconv-lite": "^0.7.3"
+  },
   "scripts": {
-    "iteminfo": "node bin/iteminfo.js"
+    "iteminfo": "node bin/iteminfo.js",
+    "generate-iteminfo": "node bin/generate-iteminfo.js",
+    "import-base": "node bin/import-base.js",
+    "patch-iteminfo": "node bin/patch-iteminfo.js",
+    "pack": "node bin/pack.js",
+    "stage": "node bin/stage.js",
+    "build": "node bin/build.js"
   }
 }

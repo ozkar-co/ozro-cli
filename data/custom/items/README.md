@@ -41,10 +41,10 @@ data/
 
 4. **Server-side**: definir items en `rathena/db/import/item_db.yml` con los IDs de arriba.
 
-5. **Repack `ozro.grf`** con GRF Editor (Windows):
-   - `npm run client:iteminfo` (genera `data/System/itemInfo_v5.lua`)
-   - Añadir archivos según [docs/client-install.md](../../docs/client-install.md)
-   - `ozro.grf` tiene prioridad 1 en `data.ini`
+5. **Distribuir custom items**:
+   - `npm run client:generate-iteminfo` → combina base + custom en `itemInfo_EN.lua`
+   - `npm run client:pack` → `dist/patch.zip` para jugadores
+   - Iconos BMP en `ozro.grf` según [docs/client-install.md](../../docs/client-install.md)
 
 6. **Regenerar assets web** (opcional):
    ```bash
@@ -81,7 +81,7 @@ Verificar nombres en español en inventario y que no haya crash al mover items.
 
 ## Pruebas (cliente)
 
-Tras repack de `ozro.grf` con `itemInfo_v5.lua` y BMPs `ozro_*_coin.bmp`:
+Tras `npm run client:pack` (o copiar `data/System/itemInfo_EN.lua` a `System/` del cliente) y repack de `ozro.grf` con BMPs `ozro_*_coin.bmp`:
 
 - Iconos custom en las 4 monedas
 - Alma de MVP (35005) usa sprite vanilla `영혼의조각` (item 7306)
