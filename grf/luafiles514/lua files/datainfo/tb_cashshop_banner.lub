@@ -1,0 +1,20 @@
+tb_cashshop_banner = {
+	[1] = {
+		"ozro00.bmp",
+		"https://ozcodx.github.io/"
+	},
+	[2] = {
+		"ozro01.bmp",
+		"https://ozcodx.github.io/"
+	},
+	[3] = {
+		"ozro02.bmp",
+		"https://ozcodx.github.io/"
+	}
+}
+
+function set_cashshop_banner()
+	for key, value in ipairs(tb_cashshop_banner) do
+		add_cashshop_banner(value[1], value[2])
+	end
+end
