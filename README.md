@@ -1,8 +1,8 @@
 # OzRo Client
 
-Parche del cliente Ragnarok Online para **OzRagnarok**: exe parcheado, GRFs de overlay, configuración de carga y traducción de items custom. Es un overlay sobre un cliente kRO completo (no incluye `data.grf` ni los GRF base).
+Parche del cliente Ragnarok Online para **OzRagnarok**: exe parcheado, overlay en carpeta `data/`, configuración de carga y traducción de items custom. Es un overlay sobre un cliente kRO completo (no incluye `data.grf` ni los GRF base).
 
-Este repo guarda todo lo necesario para **distribuir el parche a jugadores** y para **reempaquetar el GRF** cuando haga falta cambiar branding, IP o assets.
+`OzRo.exe` lee primero la carpeta `data/` del disco, así que **no necesitamos GRF propio** (`ozro.grf`). Editamos archivos sueltos, los empaquetamos en el zip y listo.
 
 ## Estructura
 
@@ -12,39 +12,55 @@ Archivos sueltos listos para **click derecho → Comprimir → enviar**.
 
 ```
 OzRo.exe
-ozro.grf
-gefenia.grf
 data.ini
+data/                    ← overlay custom (clientinfo, texturas, etc.)
 System/itemInfo_EN.lua
-OzRo.ico
 ```
+
+`gefenia.grf` y `OzRo.ico` viven en `patch/` como referencia local pero no van en el zip de distribución.
 
 ### `dist/` — zip listo para compartir
 
-El zip ya armado (`patch.zip`) para compartir link. Lo generas tu desde `patch/` y lo guardas aqui.
+El zip ya armado (`patch.zip`) para compartir link. Lo generas desde `patch/` y lo guardas aquí.
 
-### `grf/` — fuentes del overlay GRF
+### `patch/data/` — overlay del cliente
 
-Fuentes para reempaquetar `ozro.grf` en GRF Editor (Windows). Extraido de `patch/ozro.grf` (el que funciona).
+Archivos que `OzRo.exe` carga directamente desde disco (prioridad sobre GRFs base).
 
 ```
-grf/
-  data/          ← arrastra esto al GRF Editor (rutas data\...)
-    clientinfo.xml
-    etcinfo.txt
-    texture/
-    luafiles514/
-    custom/items/texture/   ← iconos custom van aqui DENTRO del GRF
-  custom/        ← fuera de data: editas aqui, copias a data/custom/ antes de empaquetar
-    items/
-      itemInfo_custom.lua
-      texture/유저인터페이스/item/*.bmp
+data/
+  clientinfo.xml         ← IP, puerto, loading screens (UTF-8)
+  etcinfo.txt
+  texture/
+    유저인터페이스/      ← carpeta coreana (nombre exacto, no transliterar)
+      loading*.jpg       ← pantallas de carga
+      t_배경*.bmp        ← fondos del login (nombre coreano exacto)
+      item/              ← iconos custom
+  luafiles514/
 ```
 
-Si cambias un icono: edita en `grf/custom/`, copia el BMP a `grf/data/custom/items/texture/유저인터페이스/item/`, empaqueta, copia el GRF a `patch/`.
+### `custom/` — staging para ediciones
 
-**No meter en el GRF:** `itemInfo_custom.lua`, `System/` (va en `patch/`).
+Editas aquí y copias a `patch/data/` antes de empaquetar.
+
+```
+custom/
+  items/
+    itemInfo_custom.lua          ← fuente de items custom (merge manual a patch/System/)
+    texture/유저인터페이스/item/*.bmp
+```
+
+Si cambias un icono: edita en `custom/`, copia el BMP a `patch/data/texture/유저인터페이스/item/`, re-zip.
+
+**No meter en `data/`:** `itemInfo_custom.lua`, `System/` (va suelto en `patch/`).
 
 ### Exe parcheado
 
 `patch/OzRo.exe` es el Ragexe parcheado con WARP. No tocar salvo cambio de PACKETVER.
+
+## Workflow
+
+1. Editar assets en `patch/data/` (o staging en `custom/` → copiar)
+2. Si hay items nuevos, actualizar `custom/items/itemInfo_custom.lua` y mergear en `patch/System/itemInfo_EN.lua`
+3. Comprimir contenido de `patch/` (sin `gefenia.grf` ni `OzRo.ico`) → `dist/patch.zip`
+4. Subir a Google Drive

@@ -1,0 +1,6 @@
+OzRo client patch
+
+1. Close the game
+2. Extract ALL files over your Ragnarok client folder
+3. Replace files when Windows asks
+4. Start OzRo.exe
