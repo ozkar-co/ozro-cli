@@ -1,0 +1,10 @@
+weather#
+//prontera.rsw#
+//snow#
+//weather#
+//pay_arche.rsw#
+//sakura#
+weather#
+comodo.rsw#
+pokjuk#
+//file end
