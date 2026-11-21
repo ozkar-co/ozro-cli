@@ -4,7 +4,7 @@
 Reads data.ini priority (first wins). Writes reports under --out-dir:
 
   client_grf_index_meta.json
-  client_maps.jsonl
+  client_maps.jsonl            # + display_name, width, height (mapnametable + GAT)
   client_item_icons.jsonl
   client_item_sprites.jsonl
   client_item_info.jsonl      # from System/itemInfo_EN.lua when present
@@ -26,6 +26,7 @@ import argparse
 import hashlib
 import json
 import re
+import struct
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,7 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from grf import Grf, GrfError  # noqa: E402
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # ACT sound events store null-terminated filenames (may include spaces).
 _WAV_NULL_TERM_RE = re.compile(
@@ -193,6 +194,37 @@ def parse_resnametable(data: bytes) -> dict[str, dict[str, str]]:
     return out
 
 
+def parse_mapnametable(data: bytes) -> dict[str, str]:
+    """Parse data/mapnametable.txt → map_id → display_name.
+
+    Lines look like: prontera.rsw#Prontera City#
+    """
+    text = data.decode("cp949", errors="replace")
+    out: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("//"):
+            continue
+        parts = [p for p in line.split("#") if p]
+        if len(parts) < 2:
+            continue
+        src, name = parts[0].strip(), parts[1].strip()
+        if ext_of(src) != "rsw" or not name:
+            continue
+        out[stem_of(src)] = name
+    return out
+
+
+def parse_gat_dimensions(data: bytes) -> tuple[int, int] | None:
+    """Read width/height from GAT header (GRAT + ver + uint32 w/h)."""
+    if len(data) < 14 or data[:4] != b"GRAT":
+        return None
+    width, height = struct.unpack_from("<II", data, 6)
+    if width == 0 or height == 0:
+        return None
+    return int(width), int(height)
+
+
 def read_active_file(
     active: dict[str, tuple[str, str]],
     grfs: dict[str, Grf],
@@ -237,10 +269,15 @@ def export_maps(
             minimaps.add(stem_of(key).lower())
 
     aliases: dict[str, dict[str, str]] = {}
+    display_names: dict[str, str] = {}
+    dim_cache: dict[str, tuple[int, int] | None] = {}
     if grfs:
         raw = read_active_file(active, grfs, "data/resnametable.txt")
         if raw:
             aliases = parse_resnametable(raw)
+        name_raw = read_active_file(active, grfs, "data/mapnametable.txt")
+        if name_raw:
+            display_names = parse_mapnametable(name_raw)
 
     physical = set(rsw) | set(gat) | set(gnd)
     maps = sorted(physical | set(aliases), key=lambda s: s.lower())
@@ -264,8 +301,28 @@ def export_maps(
         has_rsw = "rsw" in resolved
         has_gat = "gat" in resolved
         has_gnd = "gnd" in resolved
+
+        display_name = display_names.get(mid)
+        if display_name is None and "rsw" in via_alias:
+            display_name = display_names.get(via_alias["rsw"])
+
+        width = height = None
+        if grfs and "gat" in resolved:
+            gat_stem = resolved["gat"]
+            if gat_stem not in dim_cache:
+                gat_raw = read_active_file(active, grfs, f"data/{gat_stem}.gat")
+                dim_cache[gat_stem] = (
+                    parse_gat_dimensions(gat_raw) if gat_raw else None
+                )
+            dims = dim_cache[gat_stem]
+            if dims:
+                width, height = dims
+
         row = {
             "map_id": mid,
+            "display_name": display_name,
+            "width": width,
+            "height": height,
             "has_rsw": has_rsw,
             "has_gat": has_gat,
             "has_gnd": has_gnd,
@@ -926,6 +983,12 @@ def main() -> int:
             "counts": {
                 "maps": len(maps),
                 "maps_complete": sum(1 for r in maps if r["complete"]),
+                "maps_with_display_name": sum(
+                    1 for r in maps if r.get("display_name")
+                ),
+                "maps_with_dimensions": sum(
+                    1 for r in maps if r.get("width") and r.get("height")
+                ),
                 "maps_alias": maps_alias,
                 "maps_alias_complete": maps_alias_complete,
                 "item_icons": len(icons),

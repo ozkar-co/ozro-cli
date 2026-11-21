@@ -2,8 +2,8 @@
 """Minimal GRF v2 reader/extractor.
 
 Supported: GRF version 0x02xx (rdata.grf uses this). The file table is
-zlib-compressed; file entries are zlib-compressed and plaintext. The few
-DES-encrypted entries are reported as unsupported.
+zlib-compressed; file entries are zlib-compressed. Gravity DES header/mixed
+encryption is decoded via grf_crypt (rAthena-compatible).
 
 Examples:
   python3 tools/grf.py info tmp/rdata.grf
@@ -23,11 +23,15 @@ import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
+from grf_crypt import (  # noqa: E402
+    FILELIST_TYPE_ENCRYPT_HEADER,
+    FILELIST_TYPE_ENCRYPT_MIXED,
+    grf_decode,
+)
+
 GRF_MAGIC = b"Master of Magic"
 HEADER_SIZE = 0x2E
 FILELIST_TYPE_FILE = 0x01
-FILELIST_TYPE_ENCRYPT_MIXED = 0x02
-FILELIST_TYPE_ENCRYPT_HEADER = 0x04
 
 
 class GrfError(RuntimeError):
@@ -122,17 +126,17 @@ class Grf:
         return entry
 
     def read(self, entry: Entry) -> bytes:
-        if entry.type & (FILELIST_TYPE_ENCRYPT_MIXED | FILELIST_TYPE_ENCRYPT_HEADER):
-            raise GrfError(
-                f"encrypted entry not supported: {entry.name} "
-                f"(type 0x{entry.type:02x})"
-            )
         with self.path.open("rb") as f:
             f.seek(entry.srcpos)
-            raw = f.read(entry.srclen_aligned)
+            raw = bytearray(f.read(entry.srclen_aligned))
         if len(raw) != entry.srclen_aligned:
             raise GrfError(f"truncated data for {entry.name}")
-        data = zlib.decompress(raw[: entry.srclen])
+        if entry.type & (FILELIST_TYPE_ENCRYPT_MIXED | FILELIST_TYPE_ENCRYPT_HEADER):
+            grf_decode(raw, entry.type, entry.srclen)
+        try:
+            data = zlib.decompress(bytes(raw[: entry.srclen]))
+        except zlib.error as e:
+            raise GrfError(f"zlib failed for {entry.name}: {e}") from e
         if len(data) != entry.declen:
             raise GrfError(
                 f"decompressed size mismatch for {entry.name}: "

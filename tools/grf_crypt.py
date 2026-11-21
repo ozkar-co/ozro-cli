@@ -1,0 +1,190 @@
+"""GRF entry body decode (Gravity DES variant).
+
+Port of rAthena src/common/des.cpp + grfio.cpp grf_decode_*.
+Decrypts compressed payload in-place before zlib.
+"""
+
+from __future__ import annotations
+
+FILELIST_TYPE_ENCRYPT_MIXED = 0x02
+FILELIST_TYPE_ENCRYPT_HEADER = 0x04
+
+_MASK = (0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01)
+
+_IP_TABLE = (
+    58, 50, 42, 34, 26, 18, 10, 2,
+    60, 52, 44, 36, 28, 20, 12, 4,
+    62, 54, 46, 38, 30, 22, 14, 6,
+    64, 56, 48, 40, 32, 24, 16, 8,
+    57, 49, 41, 33, 25, 17, 9, 1,
+    59, 51, 43, 35, 27, 19, 11, 3,
+    61, 53, 45, 37, 29, 21, 13, 5,
+    63, 55, 47, 39, 31, 23, 15, 7,
+)
+
+_FP_TABLE = (
+    40, 8, 48, 16, 56, 24, 64, 32,
+    39, 7, 47, 15, 55, 23, 63, 31,
+    38, 6, 46, 14, 54, 22, 62, 30,
+    37, 5, 45, 13, 53, 21, 61, 29,
+    36, 4, 44, 12, 52, 20, 60, 28,
+    35, 3, 43, 11, 51, 19, 59, 27,
+    34, 2, 42, 10, 50, 18, 58, 26,
+    33, 1, 41, 9, 49, 17, 57, 25,
+)
+
+_TP_TABLE = (
+    16, 7, 20, 21,
+    29, 12, 28, 17,
+    1, 15, 23, 26,
+    5, 18, 31, 10,
+    2, 8, 24, 14,
+    32, 27, 3, 9,
+    19, 13, 30, 6,
+    22, 11, 4, 25,
+)
+
+_S_TABLE = (
+    (
+        0xEF, 0x03, 0x41, 0xFD, 0xD8, 0x74, 0x1E, 0x47, 0x26, 0xEF, 0xFB, 0x22, 0xB3, 0xD8, 0x84, 0x1E,
+        0x39, 0xAC, 0xA7, 0x60, 0x62, 0xC1, 0xCD, 0xBA, 0x5C, 0x96, 0x90, 0x59, 0x05, 0x3B, 0x7A, 0x85,
+        0x40, 0xFD, 0x1E, 0xC8, 0xE7, 0x8A, 0x8B, 0x21, 0xDA, 0x43, 0x64, 0x9F, 0x2D, 0x14, 0xB1, 0x72,
+        0xF5, 0x5B, 0xC8, 0xB6, 0x9C, 0x37, 0x76, 0xEC, 0x39, 0xA0, 0xA3, 0x05, 0x52, 0x6E, 0x0F, 0xD9,
+    ),
+    (
+        0xA7, 0xDD, 0x0D, 0x78, 0x9E, 0x0B, 0xE3, 0x95, 0x60, 0x36, 0x36, 0x4F, 0xF9, 0x60, 0x5A, 0xA3,
+        0x11, 0x24, 0xD2, 0x87, 0xC8, 0x52, 0x75, 0xEC, 0xBB, 0xC1, 0x4C, 0xBA, 0x24, 0xFE, 0x8F, 0x19,
+        0xDA, 0x13, 0x66, 0xAF, 0x49, 0xD0, 0x90, 0x06, 0x8C, 0x6A, 0xFB, 0x91, 0x37, 0x8D, 0x0D, 0x78,
+        0xBF, 0x49, 0x11, 0xF4, 0x23, 0xE5, 0xCE, 0x3B, 0x55, 0xBC, 0xA2, 0x57, 0xE8, 0x22, 0x74, 0xCE,
+    ),
+    (
+        0x2C, 0xEA, 0xC1, 0xBF, 0x4A, 0x24, 0x1F, 0xC2, 0x79, 0x47, 0xA2, 0x7C, 0xB6, 0xD9, 0x68, 0x15,
+        0x80, 0x56, 0x5D, 0x01, 0x33, 0xFD, 0xF4, 0xAE, 0xDE, 0x30, 0x07, 0x9B, 0xE5, 0x83, 0x9B, 0x68,
+        0x49, 0xB4, 0x2E, 0x83, 0x1F, 0xC2, 0xB5, 0x7C, 0xA2, 0x19, 0xD8, 0xE5, 0x7C, 0x2F, 0x83, 0xDA,
+        0xF7, 0x6B, 0x90, 0xFE, 0xC4, 0x01, 0x5A, 0x97, 0x61, 0xA6, 0x3D, 0x40, 0x0B, 0x58, 0xE6, 0x3D,
+    ),
+    (
+        0x4D, 0xD1, 0xB2, 0x0F, 0x28, 0xBD, 0xE4, 0x78, 0xF6, 0x4A, 0x0F, 0x93, 0x8B, 0x17, 0xD1, 0xA4,
+        0x3A, 0xEC, 0xC9, 0x35, 0x93, 0x56, 0x7E, 0xCB, 0x55, 0x20, 0xA0, 0xFE, 0x6C, 0x89, 0x17, 0x62,
+        0x17, 0x62, 0x4B, 0xB1, 0xB4, 0xDE, 0xD1, 0x87, 0xC9, 0x14, 0x3C, 0x4A, 0x7E, 0xA8, 0xE2, 0x7D,
+        0xA0, 0x9F, 0xF6, 0x5C, 0x6A, 0x09, 0x8D, 0xF0, 0x0F, 0xE3, 0x53, 0x25, 0x95, 0x36, 0x28, 0xCB,
+    ),
+)
+
+_SUBST = {
+    0x00: 0x2B,
+    0x2B: 0x00,
+    0x6C: 0x80,
+    0x01: 0x68,
+    0x68: 0x01,
+    0x48: 0x77,
+    0x60: 0xFF,
+    0x77: 0x48,
+    0xB9: 0xC0,
+    0xC0: 0xB9,
+    0xFE: 0xEB,
+    0xEB: 0xFE,
+    0x80: 0x6C,
+    0xFF: 0x60,
+}
+
+
+def _ip(block: bytearray) -> None:
+    tmp = bytearray(8)
+    for i, src_bit in enumerate(_IP_TABLE):
+        j = src_bit - 1
+        if block[(j >> 3) & 7] & _MASK[j & 7]:
+            tmp[(i >> 3) & 7] |= _MASK[i & 7]
+    block[:] = tmp
+
+
+def _fp(block: bytearray) -> None:
+    tmp = bytearray(8)
+    for i, src_bit in enumerate(_FP_TABLE):
+        j = src_bit - 1
+        if block[(j >> 3) & 7] & _MASK[j & 7]:
+            tmp[(i >> 3) & 7] |= _MASK[i & 7]
+    block[:] = tmp
+
+
+def _round_function(block: bytearray) -> None:
+    # E (optimized) on upper 32 bits → 8×6-bit into tmp[0..7]
+    b4, b5, b6, b7 = block[4], block[5], block[6], block[7]
+    e = [
+        ((b7 << 5) | (b4 >> 3)) & 0x3F,
+        ((b4 << 1) | (b5 >> 7)) & 0x3F,
+        ((b4 << 5) | (b5 >> 3)) & 0x3F,
+        ((b5 << 1) | (b6 >> 7)) & 0x3F,
+        ((b5 << 5) | (b6 >> 3)) & 0x3F,
+        ((b6 << 1) | (b7 >> 7)) & 0x3F,
+        ((b6 << 5) | (b7 >> 3)) & 0x3F,
+        ((b7 << 1) | (b4 >> 7)) & 0x3F,
+    ]
+    # SBOX
+    s = bytearray(4)
+    for i in range(4):
+        s[i] = (_S_TABLE[i][e[i * 2]] & 0xF0) | (_S_TABLE[i][e[i * 2 + 1]] & 0x0F)
+    # TP → into high half positions 4..7 conceptually
+    tp = bytearray(8)
+    for i, src_bit in enumerate(_TP_TABLE):
+        j = src_bit - 1
+        if s[(j >> 3)] & _MASK[j & 7]:
+            tp[(i >> 3) + 4] |= _MASK[i & 7]
+    block[0] ^= tp[4]
+    block[1] ^= tp[5]
+    block[2] ^= tp[6]
+    block[3] ^= tp[7]
+
+
+def des_decrypt_block(data: bytearray, offset: int) -> None:
+    block = bytearray(data[offset : offset + 8])
+    _ip(block)
+    _round_function(block)
+    _fp(block)
+    data[offset : offset + 8] = block
+
+
+def _shuffle_dec(data: bytearray, offset: int) -> None:
+    src = data[offset : offset + 8]
+    out = bytearray(8)
+    out[0] = src[3]
+    out[1] = src[4]
+    out[2] = src[6]
+    out[3] = src[0]
+    out[4] = src[1]
+    out[5] = src[2]
+    out[6] = src[5]
+    out[7] = _SUBST.get(src[7], src[7])
+    data[offset : offset + 8] = out
+
+
+def grf_decode(buf: bytearray, entry_type: int, entry_len: int) -> None:
+    """Decode compressed GRF payload in-place (srclen_aligned buffer)."""
+    nblocks = len(buf) // 8
+    if entry_type & FILELIST_TYPE_ENCRYPT_MIXED:
+        digits = 1
+        i = 10
+        while i <= entry_len:
+            digits += 1
+            i *= 10
+        if digits < 3:
+            cycle = 1
+        elif digits < 5:
+            cycle = digits + 1
+        elif digits < 7:
+            cycle = digits + 9
+        else:
+            cycle = digits + 15
+        for i in range(min(20, nblocks)):
+            des_decrypt_block(buf, i * 8)
+        j = -1
+        for i in range(20, nblocks):
+            if i % cycle == 0:
+                des_decrypt_block(buf, i * 8)
+                continue
+            j += 1
+            if j % 7 == 0 and j != 0:
+                _shuffle_dec(buf, i * 8)
+    elif entry_type & FILELIST_TYPE_ENCRYPT_HEADER:
+        for i in range(min(20, nblocks)):
+            des_decrypt_block(buf, i * 8)
