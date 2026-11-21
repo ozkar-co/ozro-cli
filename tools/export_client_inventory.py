@@ -16,6 +16,8 @@ Reads data.ini priority (first wins). Writes reports under --out-dir:
   client_npc_act_gaps.jsonl      # npc ACT→wav refs missing from client stack
   client_skills.jsonl            # skillid + skillinfolist + icon/sprite
   client_skill_server_gaps.jsonl # server skills missing client info/icon
+  client_statuses.jsonl          # EFST ids + titles/desc + icon resolution
+  client_status_server_gaps.jsonl  # server status.yml missing client icon/info
 
 Example:
   python3 tools/export_client_inventory.py \\
@@ -36,7 +38,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from grf import Grf, GrfError  # noqa: E402
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # ACT sound events store null-terminated filenames (may include spaces).
 _WAV_NULL_TERM_RE = re.compile(
@@ -90,6 +92,33 @@ SERVER_SKILL_DB_FILES = (
     "db/re/skill_db.yml",
     "db/import/skill_db.yml",
 )
+
+EFSTID_CANDIDATES = (
+    "data/luafiles514/lua files/stateicon/efstids.lub",
+    "data/lua files/stateicon/efstids.lub",
+)
+
+STATEICONIMG_CANDIDATES = (
+    "data/luafiles514/lua files/stateicon/stateiconimginfo.lub",
+    "data/lua files/stateicon/stateiconimginfo.lub",
+)
+
+STATEICONINFO_CANDIDATES = (
+    "data/luafiles514/lua files/stateicon/stateiconinfo.lub",
+    "data/lua files/stateicon/stateiconinfo.lub",
+)
+
+SERVER_STATUS_DB_FILES = (
+    "db/re/status.yml",
+    "db/import/status.yml",
+)
+
+_STATUS_TITLE_KIND = {
+    "COLOR_TITLE_BUFF": "buff",
+    "COLOR_TITLE_DEBUFF": "debuff",
+    "COLOR_TITLE_TOGGLE": "toggle",
+    "COLOR_TITLE_SYSTEM": "system",
+}
 
 
 def norm_path(p: str) -> str:
@@ -1113,6 +1142,336 @@ def enrich_skills_with_server(
     return out
 
 
+def _decode_lub_text(data: bytes) -> str:
+    for enc in ("utf-8", "cp949"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def parse_efstids(data: bytes) -> dict[str, int]:
+    """EFST_* name → numeric id."""
+    text = _decode_lub_text(data)
+    return {k: int(v) for k, v in re.findall(r"(EFST_\w+)\s*=\s*(-?\d+)", text)}
+
+
+def parse_stateicon_imginfo(data: bytes) -> dict[str, dict]:
+    """EFST_* → {icon_file, priority} from stateiconimginfo.lub."""
+    text = _decode_lub_text(data).replace("\r\n", "\n")
+    out: dict[str, dict] = {}
+    for m in re.finditer(
+        r"\[(PRIORITY_\w+)\]\s*=\s*\{(.*?)(?=\n\t\[PRIORITY_|\n\})", text, re.S
+    ):
+        priority = m.group(1)
+        for em in re.finditer(
+            r'\[EFST_IDs\.(EFST_\w+)\]\s*=\s*"([^"]+)"', m.group(2)
+        ):
+            out[em.group(1)] = {
+                "icon_file": em.group(2),
+                "priority": priority,
+            }
+    # fallback: any mapping outside priority blocks
+    for em in re.finditer(r'\[EFST_IDs\.(EFST_\w+)\]\s*=\s*"([^"]+)"', text):
+        out.setdefault(
+            em.group(1), {"icon_file": em.group(2), "priority": None}
+        )
+    return out
+
+
+def parse_stateicon_info(data: bytes) -> dict[str, dict]:
+    """EFST_* → {display_name, kind, description_lines, have_time_limit}."""
+    text = _decode_lub_text(data).replace("\r\n", "\n")
+    out: dict[str, dict] = {}
+    block_re = re.compile(
+        r"StateIconList\[EFST_IDs\.(EFST_\w+)\]\s*=\s*\{"
+        r"(.*?)(?=\nStateIconList\[|\Z)",
+        re.S,
+    )
+    for m in block_re.finditer(text):
+        efst = m.group(1)
+        body = m.group(2)
+        have_tl = re.search(r"haveTimeLimit\s*=\s*(\d+)", body)
+        # first descript entry: { "Title", COLOR_TITLE_* } or { "Title" }
+        title = None
+        kind = None
+        first = re.search(
+            r"descript\s*=\s*\{\s*\{\s*\"((?:\\.|[^\"\\])*)\""
+            r"(?:\s*,\s*(COLOR_TITLE_\w+))?",
+            body,
+        )
+        if first:
+            title = first.group(1)
+            if first.group(2):
+                kind = _STATUS_TITLE_KIND.get(first.group(2))
+        lines = [
+            s
+            for s in re.findall(r'\{\s*"((?:\\.|[^"\\])*)"', body)
+            if s and s != "%s"
+        ]
+        out[efst] = {
+            "display_name": title,
+            "kind": kind,
+            "description_lines": lines,
+            "have_time_limit": bool(have_tl and int(have_tl.group(1))),
+        }
+    return out
+
+
+def _index_flat_texture_stems(
+    active: dict[str, tuple[str, str]],
+    folder_prefix: str,
+) -> dict[str, tuple[str, str]]:
+    """basename.lower() → (label, orig_path) for files directly under prefix."""
+    out: dict[str, tuple[str, str]] = {}
+    prefix = folder_prefix.rstrip("/").lower() + "/"
+    for key, (label, orig) in active.items():
+        if not key.startswith(prefix):
+            continue
+        rest = key[len(prefix) :]
+        if "/" in rest:
+            continue
+        if ext_of(key) not in {"tga", "bmp", "png"}:
+            continue
+        out[basename(key).lower()] = (label, orig.replace("\\", "/"))
+    return out
+
+
+def _index_ui_item_icons(
+    active: dict[str, tuple[str, str]],
+) -> dict[str, tuple[str, str]]:
+    out: dict[str, tuple[str, str]] = {}
+    for key, (label, orig) in active.items():
+        if "유저인터페이스/item/" not in key and not key.startswith(
+            "data/texture/item/"
+        ):
+            continue
+        if "/" in key.rsplit("/", 1)[-1]:
+            continue
+        if ext_of(key) not in {"tga", "bmp", "png"}:
+            continue
+        # only direct children of item/
+        parts = key.split("/")
+        if parts[-2] != "item":
+            continue
+        out[basename(key).lower()] = (label, orig.replace("\\", "/"))
+    return out
+
+
+def _skill_icon_candidates_for_efst(
+    efst_name: str, skill_names: set[str]
+) -> list[str]:
+    """Strict skill→status icon fallback: STEM or *_STEM skill names."""
+    stem = efst_name[5:] if efst_name.startswith("EFST_") else efst_name
+    stem_u = stem.upper()
+    matches: list[str] = []
+    for sk in skill_names:
+        su = sk.upper()
+        if su == stem_u or su.endswith("_" + stem_u):
+            matches.append(sk)
+    matches.sort(key=lambda s: (len(s), s))
+    return matches
+
+
+def resolve_status_icon(
+    efst_name: str,
+    imginfo: dict[str, dict],
+    effect_icons: dict[str, tuple[str, str]],
+    item_icons: dict[str, tuple[str, str]],
+    skill_names: set[str],
+) -> tuple[bool, str | None, str | None, str | None, str | None]:
+    """Return (has_icon, path, winner_grf, icon_file, source).
+
+    source: imginfo | effect | item | skill_item
+    """
+    explicit = (imginfo.get(efst_name) or {}).get("icon_file")
+    stem = efst_name[5:].lower() if efst_name.startswith("EFST_") else efst_name.lower()
+    candidates: list[tuple[str, str]] = []
+    if explicit:
+        candidates.append(("imginfo", explicit.lower()))
+    for ext in (".tga", ".bmp", ".png"):
+        candidates.append(("effect", stem + ext))
+        candidates.append(("effect", efst_name.lower() + ext))
+    for sk in _skill_icon_candidates_for_efst(efst_name, skill_names):
+        for ext in (".bmp", ".tga", ".png"):
+            candidates.append(("skill_item", sk.lower() + ext))
+    for ext in (".bmp", ".tga", ".png"):
+        candidates.append(("item", stem + ext))
+
+    seen: set[str] = set()
+    for source, fn in candidates:
+        if fn in seen:
+            continue
+        seen.add(fn)
+        if source in {"imginfo", "effect"}:
+            hit = effect_icons.get(fn)
+            if hit is None and source == "imginfo":
+                hit = item_icons.get(fn)
+        else:
+            hit = item_icons.get(fn)
+        if hit:
+            return True, hit[1], hit[0], fn, source
+    return False, None, None, (explicit.lower() if explicit else None), None
+
+
+def export_statuses(
+    efst_ids: dict[str, int],
+    imginfo: dict[str, dict],
+    info_by: dict[str, dict],
+    effect_icons: dict[str, tuple[str, str]],
+    item_icons: dict[str, tuple[str, str]],
+    skill_names: set[str],
+) -> list[dict]:
+    names = sorted(set(efst_ids) | set(imginfo) | set(info_by))
+    rows: list[dict] = []
+    for name in names:
+        info = info_by.get(name) or {}
+        img = imginfo.get(name) or {}
+        has_icon, path, winner, icon_file, source = resolve_status_icon(
+            name, imginfo, effect_icons, item_icons, skill_names
+        )
+        display = info.get("display_name")
+        desc_lines = info.get("description_lines") or []
+        alt_names: list[str] = []
+        # description lines after title can include alternate wording; keep title only in display
+        rows.append(
+            {
+                "status_id": efst_ids.get(name),
+                "efst_name": name,
+                "display_name": display,
+                "alt_names": alt_names,
+                "kind": info.get("kind"),
+                "description_lines": desc_lines,
+                "have_time_limit": bool(info.get("have_time_limit")),
+                "priority": img.get("priority"),
+                "icon_file": icon_file or img.get("icon_file"),
+                "icon_source": source,
+                "has_stateinfo": name in info_by,
+                "has_imginfo": name in imginfo,
+                "has_icon": has_icon,
+                "icon_path": path,
+                "icon_winner_grf": winner,
+            }
+        )
+    rows.sort(
+        key=lambda r: (
+            r["status_id"] is None,
+            r["status_id"] if r["status_id"] is not None else 0,
+            r["efst_name"],
+        )
+    )
+    return rows
+
+
+def load_server_statuses(rathena: Path) -> list[dict]:
+    """Return [{status_name, icon}, ...] from status.yml."""
+    rows: list[dict] = []
+    for rel in SERVER_STATUS_DB_FILES:
+        path = rathena / rel
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        cur: dict | None = None
+        for line in text.splitlines():
+            m = re.match(r"^\s+-\s+Status:\s*(\S+)", line)
+            if m:
+                if cur:
+                    rows.append(cur)
+                cur = {"status_name": m.group(1), "icon": None}
+                continue
+            if cur is None:
+                continue
+            m = re.match(r"^\s+Icon:\s*(\S+)", line)
+            if m:
+                cur["icon"] = m.group(1)
+        if cur:
+            rows.append(cur)
+    # last file wins per status_name
+    by_name: dict[str, dict] = {}
+    for r in rows:
+        by_name[r["status_name"]] = r
+    return [by_name[k] for k in sorted(by_name)]
+
+
+def enrich_statuses_with_server(
+    client_statuses: list[dict],
+    server_statuses: list[dict],
+) -> list[dict]:
+    by_icon: dict[str, list[str]] = {}
+    for s in server_statuses:
+        icon = s.get("icon")
+        if not icon or icon == "EFST_BLANK":
+            continue
+        by_icon.setdefault(icon, []).append(s["status_name"])
+    out: list[dict] = []
+    for row in client_statuses:
+        enriched = dict(row)
+        names = by_icon.get(row["efst_name"]) or []
+        enriched["server_status_names"] = names
+        enriched["in_server_db"] = bool(names)
+        # server SC names as alt when they differ from display/efst stem
+        stem = row["efst_name"][5:] if row["efst_name"].startswith("EFST_") else row["efst_name"]
+        alts: list[str] = list(row.get("alt_names") or [])
+        seen = {row.get("display_name"), row["efst_name"], stem, *alts}
+        for n in names:
+            if n not in seen:
+                alts.append(n)
+                seen.add(n)
+        enriched["alt_names"] = alts
+        out.append(enriched)
+    return out
+
+
+def build_server_status_gaps(
+    server_statuses: list[dict],
+    client_statuses: list[dict],
+) -> list[dict]:
+    by_efst = {r["efst_name"]: r for r in client_statuses}
+    gaps: list[dict] = []
+    for s in server_statuses:
+        icon = s.get("icon")
+        if not icon or icon == "EFST_BLANK":
+            continue
+        row = by_efst.get(icon)
+        if row is None:
+            gaps.append(
+                {
+                    "status_name": s["status_name"],
+                    "icon": icon,
+                    "reason": "no_client_efst",
+                    "display_name": None,
+                    "has_stateinfo": False,
+                    "has_icon": False,
+                }
+            )
+            continue
+        if not row.get("has_stateinfo"):
+            gaps.append(
+                {
+                    "status_name": s["status_name"],
+                    "icon": icon,
+                    "reason": "no_stateinfo",
+                    "display_name": row.get("display_name"),
+                    "has_stateinfo": False,
+                    "has_icon": bool(row.get("has_icon")),
+                }
+            )
+            continue
+        if not row.get("has_icon"):
+            gaps.append(
+                {
+                    "status_name": s["status_name"],
+                    "icon": icon,
+                    "reason": "missing_icon",
+                    "display_name": row.get("display_name"),
+                    "has_stateinfo": True,
+                    "has_icon": False,
+                }
+            )
+    return gaps
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -1136,7 +1495,7 @@ def main() -> int:
         "--rathena",
         type=Path,
         default=None,
-        help="default: <cli-root>/../rathena — enables item/mob/skill server gap reports",
+        help="default: <cli-root>/../rathena — enables item/mob/skill/status server gap reports",
     )
     args = ap.parse_args()
     cli_root: Path = args.cli_root.resolve()
@@ -1252,12 +1611,44 @@ def main() -> int:
             flush=True,
         )
 
+        print("parsing efstids / stateiconimginfo / stateiconinfo…", flush=True)
+        efst_ids: dict[str, int] = {}
+        status_imginfo: dict[str, dict] = {}
+        status_info_by: dict[str, dict] = {}
+        efst_raw = find_active_lub(active, grfs, EFSTID_CANDIDATES)
+        status_img_raw = find_active_lub(active, grfs, STATEICONIMG_CANDIDATES)
+        status_info_raw = find_active_lub(active, grfs, STATEICONINFO_CANDIDATES)
+        if efst_raw:
+            efst_ids = parse_efstids(efst_raw)
+        if status_img_raw:
+            status_imginfo = parse_stateicon_imginfo(status_img_raw)
+        if status_info_raw:
+            status_info_by = parse_stateicon_info(status_info_raw)
+        effect_icons = _index_flat_texture_stems(active, "data/texture/effect")
+        item_status_icons = _index_ui_item_icons(active)
+        statuses = export_statuses(
+            efst_ids,
+            status_imginfo,
+            status_info_by,
+            effect_icons,
+            item_status_icons,
+            set(skill_ids),
+        )
+        print(
+            f"  efst={len(efst_ids)} imginfo={len(status_imginfo)} "
+            f"stateinfo={len(status_info_by)} catalog={len(statuses)} "
+            f"with_icon={sum(1 for r in statuses if r.get('has_icon'))}",
+            flush=True,
+        )
+
         server_gaps: list[dict] = []
         server_ids: list[int] = []
         server_mobs: list[dict] = []
         mob_gaps: list[dict] = []
         server_skills: list[dict] = []
         skill_gaps: list[dict] = []
+        server_statuses: list[dict] = []
+        status_gaps: list[dict] = []
         if rathena.is_dir():
             print(f"loading server dbs: {rathena}", flush=True)
             server_ids = load_server_item_ids(rathena)
@@ -1269,6 +1660,9 @@ def main() -> int:
             server_skills = load_server_skills(rathena)
             skills = enrich_skills_with_server(skills, server_skills)
             skill_gaps = build_server_skill_gaps(server_skills, skills)
+            server_statuses = load_server_statuses(rathena)
+            statuses = enrich_statuses_with_server(statuses, server_statuses)
+            status_gaps = build_server_status_gaps(server_statuses, statuses)
         else:
             print(f"skip server gaps (rathena missing): {rathena}", flush=True)
 
@@ -1281,6 +1675,7 @@ def main() -> int:
         write_jsonl(out_dir / "client_npc_sprites.jsonl", npc_spr)
         write_jsonl(out_dir / "client_npc_act_gaps.jsonl", npc_act_gaps)
         write_jsonl(out_dir / "client_skills.jsonl", skills)
+        write_jsonl(out_dir / "client_statuses.jsonl", statuses)
         if item_info:
             write_jsonl(out_dir / "client_item_info.jsonl", item_info)
         if server_gaps or server_ids:
@@ -1289,6 +1684,8 @@ def main() -> int:
             write_jsonl(out_dir / "client_mob_server_gaps.jsonl", mob_gaps)
         if skill_gaps or server_skills:
             write_jsonl(out_dir / "client_skill_server_gaps.jsonl", skill_gaps)
+        if status_gaps or server_statuses:
+            write_jsonl(out_dir / "client_status_server_gaps.jsonl", status_gaps)
 
         maps_alias = sum(1 for r in maps if r.get("alias_of"))
         maps_alias_complete = sum(
@@ -1333,6 +1730,31 @@ def main() -> int:
             - skills_no_skillinfo
             - skills_missing_icon
         )
+        statuses_with_icon = sum(1 for r in statuses if r.get("has_icon"))
+        statuses_with_info = sum(1 for r in statuses if r.get("has_stateinfo"))
+        statuses_with_display = sum(1 for r in statuses if r.get("display_name"))
+        statuses_server = len(server_statuses)
+        statuses_no_client = sum(
+            1 for g in status_gaps if g["reason"] == "no_client_efst"
+        )
+        statuses_no_info = sum(
+            1 for g in status_gaps if g["reason"] == "no_stateinfo"
+        )
+        statuses_missing_icon = sum(
+            1 for g in status_gaps if g["reason"] == "missing_icon"
+        )
+        # server rows with Icon (excl blank) that are fully ok
+        statuses_server_with_icon_field = sum(
+            1
+            for s in server_statuses
+            if s.get("icon") and s.get("icon") != "EFST_BLANK"
+        )
+        statuses_server_ok = (
+            statuses_server_with_icon_field
+            - statuses_no_client
+            - statuses_no_info
+            - statuses_missing_icon
+        )
         meta = {
             "schema_version": SCHEMA_VERSION,
             "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1342,7 +1764,7 @@ def main() -> int:
             "grfs": grf_meta,
             "active_path_count": len(active),
             "rathena": str(rathena)
-            if (server_ids or server_mobs or server_skills)
+            if (server_ids or server_mobs or server_skills or server_statuses)
             else None,
             "counts": {
                 "maps": len(maps),
@@ -1403,6 +1825,17 @@ def main() -> int:
                 "skills_no_client": skills_no_client,
                 "skills_no_skillinfo": skills_no_skillinfo,
                 "skills_server_missing_icon": skills_missing_icon,
+                "statuses": len(statuses),
+                "statuses_with_stateinfo": statuses_with_info,
+                "statuses_with_display_name": statuses_with_display,
+                "statuses_with_icon": statuses_with_icon,
+                "statuses_missing_icon": len(statuses) - statuses_with_icon,
+                "statuses_server": statuses_server,
+                "statuses_server_with_icon": statuses_server_with_icon_field,
+                "statuses_server_ok": statuses_server_ok,
+                "statuses_no_client_efst": statuses_no_client,
+                "statuses_no_stateinfo": statuses_no_info,
+                "statuses_server_missing_icon": statuses_missing_icon,
             },
             "outputs": [
                 "client_grf_index_meta.json",
@@ -1418,6 +1851,8 @@ def main() -> int:
                 "client_npc_act_gaps.jsonl",
                 "client_skills.jsonl",
                 "client_skill_server_gaps.jsonl" if server_skills else None,
+                "client_statuses.jsonl",
+                "client_status_server_gaps.jsonl" if server_statuses else None,
             ],
         }
         meta["outputs"] = [x for x in meta["outputs"] if x]
