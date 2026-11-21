@@ -14,6 +14,8 @@ Reads data.ini priority (first wins). Writes reports under --out-dir:
   client_mob_act_gaps.jsonl      # mob ACT→wav refs missing from client stack
   client_npc_sprites.jsonl
   client_npc_act_gaps.jsonl      # npc ACT→wav refs missing from client stack
+  client_skills.jsonl            # skillid + skillinfolist + icon/sprite
+  client_skill_server_gaps.jsonl # server skills missing client info/icon
 
 Example:
   python3 tools/export_client_inventory.py \\
@@ -34,7 +36,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from grf import Grf, GrfError  # noqa: E402
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # ACT sound events store null-terminated filenames (may include spaces).
 _WAV_NULL_TERM_RE = re.compile(
@@ -67,6 +69,26 @@ NPCIDENTITY_CANDIDATES = (
 JOBNAME_CANDIDATES = (
     "data/luafiles514/lua files/datainfo/jobname.lub",
     "data/lua files/datainfo/jobname.lub",
+)
+
+SKILLID_CANDIDATES = (
+    "data/luafiles514/lua files/skillinfoz/skillid.lub",
+    "data/lua files/skillinfoz/skillid.lub",
+)
+
+SKILLINFOLIST_CANDIDATES = (
+    "data/luafiles514/lua files/skillinfoz/skillinfolist.lub",
+    "data/lua files/skillinfoz/skillinfolist.lub",
+)
+
+SKILLDESCRIPT_CANDIDATES = (
+    "data/luafiles514/lua files/skillinfoz/skilldescript.lub",
+    "data/lua files/skillinfoz/skilldescript.lub",
+)
+
+SERVER_SKILL_DB_FILES = (
+    "db/re/skill_db.yml",
+    "db/import/skill_db.yml",
 )
 
 
@@ -842,6 +864,255 @@ def build_server_mob_gaps(
     return gaps
 
 
+def parse_skillid(data: bytes) -> dict[str, int]:
+    """SKID name → numeric id from skillid.lub."""
+    text = data.decode("utf-8", errors="replace")
+    out: dict[str, int] = {}
+    for m in re.finditer(r"(\w+)\s*=\s*(\d+)", text):
+        out[m.group(1)] = int(m.group(2))
+    return out
+
+
+def parse_skillinfolist(data: bytes) -> dict[str, dict]:
+    """SKID name → {resource_name, display_name, max_lv, type}."""
+    text = data.decode("utf-8", errors="replace").replace("\r\n", "\n")
+    out: dict[str, dict] = {}
+    # last table entry omits the trailing comma before closing `}`
+    block_re = re.compile(r"\[SKID\.(\w+)\]\s*=\s*\{(.*?)\n\t\},?", re.S)
+    for m in block_re.finditer(text):
+        sk = m.group(1)
+        body = m.group(2)
+        res_m = re.search(r'^\s*"((?:\\.|[^"\\])*)"', body, re.M)
+        name_m = re.search(r'SkillName\s*=\s*"((?:\\.|[^"\\])*)"', body)
+        max_m = re.search(r"MaxLv\s*=\s*(\d+)", body)
+        type_m = re.search(r'Type\s*=\s*"((?:\\.|[^"\\])*)"', body)
+        out[sk] = {
+            "resource_name": res_m.group(1) if res_m else sk,
+            "display_name": name_m.group(1) if name_m else None,
+            "max_lv": int(max_m.group(1)) if max_m else None,
+            "type": type_m.group(1) if type_m else None,
+        }
+    return out
+
+
+def parse_skilldescript_titles(data: bytes) -> dict[str, str]:
+    """SKID name → first description line (display title)."""
+    text = data.decode("utf-8", errors="replace")
+    out: dict[str, str] = {}
+    for m in re.finditer(
+        r'\[SKID\.(\w+)\]\s*=\s*\{\s*"((?:\\.|[^"\\])*)"', text
+    ):
+        out[m.group(1)] = m.group(2)
+    return out
+
+
+def _skill_icon_key(resource_name: str) -> str:
+    return (
+        "data/texture/유저인터페이스/item/"
+        + resource_name.lower()
+        + ".bmp"
+    )
+
+
+def export_skills(
+    active: dict[str, tuple[str, str]],
+    skill_ids: dict[str, int],
+    info_by: dict[str, dict],
+    descript_titles: dict[str, str],
+    item_sprites: list[dict],
+) -> list[dict]:
+    """Catalog client skills: id, names, icon/sprite presence."""
+    spr_by = {r["sprite_stem"].lower(): r for r in item_sprites}
+    names = sorted(set(skill_ids) | set(info_by) | set(descript_titles))
+    rows: list[dict] = []
+    for sk in names:
+        info = info_by.get(sk) or {}
+        resource = info.get("resource_name") or sk
+        display = info.get("display_name")
+        descript_title = descript_titles.get(sk)
+        icon_key = _skill_icon_key(resource)
+        icon_hit = active.get(icon_key)
+        # also accept non-bmp under same stem via _ui path variants
+        if icon_hit is None:
+            for ext in ("tga", "png"):
+                alt = icon_key[:-3] + ext
+                icon_hit = active.get(alt)
+                if icon_hit:
+                    icon_key = alt
+                    break
+        spr = spr_by.get(resource.lower())
+        has_icon = icon_hit is not None
+        has_spr = bool(spr and spr.get("has_spr") and spr.get("has_act"))
+
+        # if SkillName missing, promote descript title to display
+        if not display and descript_title:
+            display = descript_title
+        alt_names: list[str] = []
+        seen = {sk, resource, display}
+        for cand in (info.get("display_name"), descript_title):
+            if not cand or cand in seen:
+                continue
+            seen.add(cand)
+            alt_names.append(cand)
+
+        row: dict = {
+            "skill_id": skill_ids.get(sk),
+            "aegis_name": sk,
+            "resource_name": resource,
+            "display_name": display,
+            "descript_title": descript_title,
+            "alt_names": alt_names,
+            "max_lv": info.get("max_lv"),
+            "type": info.get("type"),
+            "has_skillinfo": sk in info_by,
+            "has_descript": sk in descript_titles,
+            "has_icon": has_icon,
+            "has_sprite": has_spr,
+            "assets_complete": has_icon,
+        }
+        if has_icon and icon_hit:
+            row["icon_path"] = icon_hit[1].replace("\\", "/")
+            row["icon_winner_grf"] = icon_hit[0]
+        rows.append(row)
+    rows.sort(
+        key=lambda r: (
+            r["skill_id"] is None,
+            r["skill_id"] if r["skill_id"] is not None else 0,
+            r["aegis_name"],
+        )
+    )
+    return rows
+
+
+def load_server_skills(rathena: Path) -> list[dict]:
+    """Return [{skill_id, aegis_name, description}, ...] from skill_db YAML."""
+    by_id: dict[int, dict] = {}
+    for rel in SERVER_SKILL_DB_FILES:
+        path = rathena / rel
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        cur_id: int | None = None
+        cur_name: str | None = None
+        cur_desc: str | None = None
+
+        def flush() -> None:
+            nonlocal cur_id, cur_name, cur_desc
+            if cur_id is None:
+                return
+            by_id[cur_id] = {
+                "skill_id": cur_id,
+                "aegis_name": cur_name,
+                "description": cur_desc,
+            }
+            cur_id, cur_name, cur_desc = None, None, None
+
+        for line in text.splitlines():
+            m = re.match(r"^\s+-\s+Id:\s*(\d+)", line)
+            if m:
+                flush()
+                cur_id = int(m.group(1))
+                continue
+            if cur_id is None:
+                continue
+            m = re.match(r"^\s+Name:\s*(.+)$", line)
+            if m:
+                cur_name = m.group(1).strip().strip("\"'")
+                continue
+            m = re.match(r"^\s+Description:\s*(.+)$", line)
+            if m:
+                cur_desc = m.group(1).strip().strip("\"'")
+        flush()
+    return [by_id[i] for i in sorted(by_id)]
+
+
+def build_server_skill_gaps(
+    server_skills: list[dict],
+    client_skills: list[dict],
+) -> list[dict]:
+    by_id = {r["skill_id"]: r for r in client_skills if r.get("skill_id") is not None}
+    by_name = {r["aegis_name"]: r for r in client_skills}
+    gaps: list[dict] = []
+    for s in server_skills:
+        sid = s["skill_id"]
+        aegis = s.get("aegis_name") or ""
+        row = by_id.get(sid) or (by_name.get(aegis) if aegis else None)
+        if row is None:
+            gaps.append(
+                {
+                    "skill_id": sid,
+                    "aegis_name": aegis or None,
+                    "reason": "no_client",
+                    "display_name": s.get("description"),
+                    "has_skillinfo": False,
+                    "has_icon": False,
+                }
+            )
+            continue
+        if not row.get("has_skillinfo"):
+            gaps.append(
+                {
+                    "skill_id": sid,
+                    "aegis_name": row.get("aegis_name") or aegis or None,
+                    "reason": "no_skillinfo",
+                    "display_name": row.get("display_name") or s.get("description"),
+                    "has_skillinfo": False,
+                    "has_icon": bool(row.get("has_icon")),
+                }
+            )
+            continue
+        if not row.get("has_icon"):
+            gaps.append(
+                {
+                    "skill_id": sid,
+                    "aegis_name": row.get("aegis_name") or aegis or None,
+                    "reason": "missing_icon",
+                    "display_name": row.get("display_name") or s.get("description"),
+                    "has_skillinfo": True,
+                    "has_icon": False,
+                }
+            )
+    return gaps
+
+
+def enrich_skills_with_server(
+    client_skills: list[dict],
+    server_skills: list[dict],
+) -> list[dict]:
+    """Attach server Description as alt name when it differs from client display."""
+    by_id = {s["skill_id"]: s for s in server_skills}
+    by_name = {
+        s["aegis_name"]: s for s in server_skills if s.get("aegis_name")
+    }
+    out: list[dict] = []
+    for row in client_skills:
+        enriched = dict(row)
+        srv = None
+        if row.get("skill_id") is not None:
+            srv = by_id.get(row["skill_id"])
+        if srv is None:
+            srv = by_name.get(row["aegis_name"])
+        if srv:
+            enriched["server_aegis_name"] = srv.get("aegis_name")
+            enriched["server_description"] = srv.get("description")
+            desc = srv.get("description")
+            if desc:
+                seen = {
+                    row.get("aegis_name"),
+                    row.get("resource_name"),
+                    row.get("display_name"),
+                    row.get("descript_title"),
+                    *(row.get("alt_names") or []),
+                }
+                if desc not in seen:
+                    enriched["alt_names"] = [*(row.get("alt_names") or []), desc]
+            enriched["in_server_db"] = True
+        else:
+            enriched["in_server_db"] = False
+        out.append(enriched)
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -865,7 +1136,7 @@ def main() -> int:
         "--rathena",
         type=Path,
         default=None,
-        help="default: <cli-root>/../rathena — enables item/mob server gap reports",
+        help="default: <cli-root>/../rathena — enables item/mob/skill server gap reports",
     )
     args = ap.parse_args()
     cli_root: Path = args.cli_root.resolve()
@@ -958,10 +1229,35 @@ def main() -> int:
                 parse_item_info(item_info_path), icons, item_spr
             )
 
+        print("parsing skillid / skillinfolist / skilldescript…", flush=True)
+        skill_ids: dict[str, int] = {}
+        skill_info_by: dict[str, dict] = {}
+        skill_descript_titles: dict[str, str] = {}
+        skillid_raw = find_active_lub(active, grfs, SKILLID_CANDIDATES)
+        skillinfo_raw = find_active_lub(active, grfs, SKILLINFOLIST_CANDIDATES)
+        skilldesc_raw = find_active_lub(active, grfs, SKILLDESCRIPT_CANDIDATES)
+        if skillid_raw:
+            skill_ids = parse_skillid(skillid_raw)
+        if skillinfo_raw:
+            skill_info_by = parse_skillinfolist(skillinfo_raw)
+        if skilldesc_raw:
+            skill_descript_titles = parse_skilldescript_titles(skilldesc_raw)
+        skills = export_skills(
+            active, skill_ids, skill_info_by, skill_descript_titles, item_spr
+        )
+        print(
+            f"  skillid={len(skill_ids)} skillinfo={len(skill_info_by)} "
+            f"descript={len(skill_descript_titles)} catalog={len(skills)} "
+            f"with_icon={sum(1 for r in skills if r.get('has_icon'))}",
+            flush=True,
+        )
+
         server_gaps: list[dict] = []
         server_ids: list[int] = []
         server_mobs: list[dict] = []
         mob_gaps: list[dict] = []
+        server_skills: list[dict] = []
+        skill_gaps: list[dict] = []
         if rathena.is_dir():
             print(f"loading server dbs: {rathena}", flush=True)
             server_ids = load_server_item_ids(rathena)
@@ -970,6 +1266,9 @@ def main() -> int:
             mob_gaps = build_server_mob_gaps(
                 server_mobs, id_to_jt, jt_to_spr, mob_spr, gr2_stems
             )
+            server_skills = load_server_skills(rathena)
+            skills = enrich_skills_with_server(skills, server_skills)
+            skill_gaps = build_server_skill_gaps(server_skills, skills)
         else:
             print(f"skip server gaps (rathena missing): {rathena}", flush=True)
 
@@ -981,12 +1280,15 @@ def main() -> int:
         write_jsonl(out_dir / "client_mob_act_gaps.jsonl", mob_act_gaps)
         write_jsonl(out_dir / "client_npc_sprites.jsonl", npc_spr)
         write_jsonl(out_dir / "client_npc_act_gaps.jsonl", npc_act_gaps)
+        write_jsonl(out_dir / "client_skills.jsonl", skills)
         if item_info:
             write_jsonl(out_dir / "client_item_info.jsonl", item_info)
         if server_gaps or server_ids:
             write_jsonl(out_dir / "client_item_server_gaps.jsonl", server_gaps)
         if mob_gaps or server_mobs:
             write_jsonl(out_dir / "client_mob_server_gaps.jsonl", mob_gaps)
+        if skill_gaps or server_skills:
+            write_jsonl(out_dir / "client_skill_server_gaps.jsonl", skill_gaps)
 
         maps_alias = sum(1 for r in maps if r.get("alias_of"))
         maps_alias_complete = sum(
@@ -1013,6 +1315,24 @@ def main() -> int:
             if r.get("has_act") and not r.get("act_deps_complete")
         )
         mob_wav_missing_unique = sorted({g["wav"] for g in mob_act_gaps})
+        skills_with_icon = sum(1 for r in skills if r.get("has_icon"))
+        skills_with_info = sum(1 for r in skills if r.get("has_skillinfo"))
+        skills_with_display = sum(1 for r in skills if r.get("display_name"))
+        skills_with_alt = sum(1 for r in skills if r.get("alt_names"))
+        skills_server = len(server_skills)
+        skills_no_client = sum(1 for g in skill_gaps if g["reason"] == "no_client")
+        skills_no_skillinfo = sum(
+            1 for g in skill_gaps if g["reason"] == "no_skillinfo"
+        )
+        skills_missing_icon = sum(
+            1 for g in skill_gaps if g["reason"] == "missing_icon"
+        )
+        skills_server_ok = (
+            skills_server
+            - skills_no_client
+            - skills_no_skillinfo
+            - skills_missing_icon
+        )
         meta = {
             "schema_version": SCHEMA_VERSION,
             "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1021,7 +1341,9 @@ def main() -> int:
             "grf_paths": {m["label"]: m["path"] for m in grf_meta},
             "grfs": grf_meta,
             "active_path_count": len(active),
-            "rathena": str(rathena) if (server_ids or server_mobs) else None,
+            "rathena": str(rathena)
+            if (server_ids or server_mobs or server_skills)
+            else None,
             "counts": {
                 "maps": len(maps),
                 "maps_complete": sum(1 for r in maps if r["complete"]),
@@ -1069,6 +1391,18 @@ def main() -> int:
                 "npcs_act_wav_missing_unique": len(
                     {g["wav"] for g in npc_act_gaps}
                 ),
+                "skills": len(skills),
+                "skills_with_skillinfo": skills_with_info,
+                "skills_with_display_name": skills_with_display,
+                "skills_with_alt_names": skills_with_alt,
+                "skills_with_icon": skills_with_icon,
+                "skills_with_sprite": sum(1 for r in skills if r.get("has_sprite")),
+                "skills_missing_icon": len(skills) - skills_with_icon,
+                "skills_server": skills_server,
+                "skills_server_ok": skills_server_ok,
+                "skills_no_client": skills_no_client,
+                "skills_no_skillinfo": skills_no_skillinfo,
+                "skills_server_missing_icon": skills_missing_icon,
             },
             "outputs": [
                 "client_grf_index_meta.json",
@@ -1082,6 +1416,8 @@ def main() -> int:
                 "client_mob_server_gaps.jsonl" if server_mobs else None,
                 "client_npc_sprites.jsonl",
                 "client_npc_act_gaps.jsonl",
+                "client_skills.jsonl",
+                "client_skill_server_gaps.jsonl" if server_skills else None,
             ],
         }
         meta["outputs"] = [x for x in meta["outputs"] if x]

@@ -24,6 +24,7 @@ Inventario machine-readable: `tools/export_client_inventory.py` → `ozro-data/r
 MAPAS     resnametable? → data/<stem>.{rsw,gat,gnd} (+ minimap)
 ITEMS     itemInfo[id].identifiedResourceName → icon/collection/sprite
 MOB/NPC   classId → npcidentity JT_* → jobname sprite → spr+act | .gr2
+SKILLS    skillid → skillinfolist (SkillName/resource) → item/<resource>.bmp
 SONIDO    .act embebe nombres .wav → data/wav/**
 ```
 
@@ -162,6 +163,7 @@ Usado por guardians, treasure boxes, emperium, flags, etc. Jobname termina en `.
 | Dominio | Paths |
 |---|---|
 | Item icon | `data/texture/유저인터페이스/item/` |
+| Skill icon | same item folder: `<resource_name>.bmp` (from skillinfolist) |
 | Item collection | `data/texture/유저인터페이스/collection/` |
 | Card | `data/texture/유저인터페이스/cardbmp/` |
 | Item body sprite | `data/sprite/아이템/` |
@@ -202,6 +204,8 @@ Salidas clave:
 | `client_item_*.jsonl` | icons/sprites/itemInfo/server gaps |
 | `client_mob_*.jsonl` | sprites, server gaps, ACT wav gaps |
 | `client_npc_*.jsonl` | sprites **wired**, ACT wav gaps |
+| `client_skills.jsonl` | id, aegis, display/alt names, icon/sprite |
+| `client_skill_server_gaps.jsonl` | server skills missing client info/icon |
 
 Gap-fill donor (kRO) = scripts one-shot bajo `.tmp/*_donor_fill/` (no tools permanentes): pack spr/act/wav + append texto a identity/jobname/itemInfo; no pisar `data.grf`.
 
