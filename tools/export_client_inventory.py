@@ -33,7 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from grf import Grf, GrfError  # noqa: E402
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # ACT sound events store null-terminated filenames (may include spaces).
 _WAV_NULL_TERM_RE = re.compile(
@@ -580,6 +580,27 @@ def extract_act_wav_refs(act_blob: bytes) -> list[str]:
     return ordered
 
 
+def jobname_sprite_stems(jt_to_spr: dict[str, str]) -> set[str]:
+    """Lowercase stems referenced by jobname (strip .gr2)."""
+    out: set[str] = set()
+    for spr in jt_to_spr.values():
+        name = spr.strip()
+        if not name:
+            continue
+        lower = name.lower()
+        if lower.endswith(".gr2"):
+            lower = lower[:-4]
+        out.add(lower)
+    return out
+
+
+def filter_sprites_by_stems(
+    sprites: list[dict], allowed: set[str]
+) -> list[dict]:
+    """Keep only sprite rows whose stem is in allowed (case-insensitive)."""
+    return [r for r in sprites if r["sprite_stem"].lower() in allowed]
+
+
 def enrich_sprite_act_deps(
     sprites: list[dict],
     active: dict[str, tuple[str, str]],
@@ -784,9 +805,29 @@ def main() -> int:
         print("exporting mob sprites…", flush=True)
         mob_spr = export_sprite_dir(active, {"몬스터", "monster"})
         print("exporting npc sprites…", flush=True)
-        npc_spr = export_sprite_dir(active, {"npc", "엔피씨"})
+        npc_spr_all = export_sprite_dir(active, {"npc", "엔피씨"})
         gr2_stems = export_gr2_stems(active)
         wav_names = index_wav_basenames(active)
+
+        print("parsing npcidentity / jobname…", flush=True)
+        id_to_jt: dict[int, str] = {}
+        jt_to_spr: dict[str, str] = {}
+        ident_raw = find_active_lub(active, grfs, NPCIDENTITY_CANDIDATES)
+        job_raw = find_active_lub(active, grfs, JOBNAME_CANDIDATES)
+        if ident_raw:
+            id_to_jt = parse_npcidentity(ident_raw)
+        if job_raw:
+            jt_to_spr = parse_jobname(job_raw)
+        wired_stems = jobname_sprite_stems(jt_to_spr)
+        # Inventory NPCs = usable only (referenced by jobname), not loose GRF files.
+        npc_spr = filter_sprites_by_stems(npc_spr_all, wired_stems)
+        print(
+            f"  identity ids={len(id_to_jt)} jobname entries={len(jt_to_spr)} "
+            f"gr2_stems={len(gr2_stems)} "
+            f"npc_files={len(npc_spr_all)} npc_wired={len(npc_spr)}",
+            flush=True,
+        )
+
         print(
             f"scanning mob/npc ACT→wav deps (wavs indexed={len(wav_names)})…",
             flush=True,
@@ -817,21 +858,6 @@ def main() -> int:
             item_info = enrich_item_info(
                 parse_item_info(item_info_path), icons, item_spr
             )
-
-        print("parsing npcidentity / jobname…", flush=True)
-        id_to_jt: dict[int, str] = {}
-        jt_to_spr: dict[str, str] = {}
-        ident_raw = find_active_lub(active, grfs, NPCIDENTITY_CANDIDATES)
-        job_raw = find_active_lub(active, grfs, JOBNAME_CANDIDATES)
-        if ident_raw:
-            id_to_jt = parse_npcidentity(ident_raw)
-        if job_raw:
-            jt_to_spr = parse_jobname(job_raw)
-        print(
-            f"  identity ids={len(id_to_jt)} jobname entries={len(jt_to_spr)} "
-            f"gr2_stems={len(gr2_stems)}",
-            flush=True,
-        )
 
         server_gaps: list[dict] = []
         server_ids: list[int] = []
@@ -924,6 +950,8 @@ def main() -> int:
                 "mobs_no_jobname": mobs_no_jobname,
                 "mobs_missing_sprite": mobs_missing_sprite,
                 "npc_sprites": len(npc_spr),
+                "npc_sprites_files": len(npc_spr_all),
+                "npc_sprites_unwired": len(npc_spr_all) - len(npc_spr),
                 "npcs_act_deps_incomplete": sum(
                     1
                     for r in npc_spr
