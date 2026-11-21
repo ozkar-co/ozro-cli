@@ -2,6 +2,11 @@
 
 Parche de cliente de Ragnarok Online para **OzRagnarok** (3 jugadores). Se mantiene a mano, sin updater ni servicios web. Se edita `patch/`, se comprime en `dist/patch.zip` y se reparte por USB o link; cada jugador lo descomprime en la raíz de su cliente. Sitio informativo: `https://ro.ozkr.net/`.
 
+## Docs
+
+- `docs/client-assets.md` — carpetas, tipos de archivo y cableado (mapas/alias, items, mobs/NPCs identity+jobname, ACT→wav, inventario).
+- `docs/ragexe-internals.md` — parches del `OzRo.exe`.
+
 ## Estructura
 
 ```
