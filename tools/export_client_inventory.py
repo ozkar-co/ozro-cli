@@ -38,7 +38,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from grf import Grf, GrfError  # noqa: E402
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # ACT sound events store null-terminated filenames (may include spaces).
 _WAV_NULL_TERM_RE = re.compile(
@@ -1262,13 +1262,21 @@ def _index_ui_item_icons(
 def _skill_icon_candidates_for_efst(
     efst_name: str, skill_names: set[str]
 ) -> list[str]:
-    """Strict skill→status icon fallback: STEM or *_STEM skill names."""
+    """Strict skill→status icon fallback: STEM or *_STEM skill names.
+
+    Also matches underscore-stripped forms (EFST_INC_AGI → AL_INCAGI).
+    """
     stem = efst_name[5:] if efst_name.startswith("EFST_") else efst_name
     stem_u = stem.upper()
+    stem_compact = stem_u.replace("_", "")
     matches: list[str] = []
     for sk in skill_names:
         su = sk.upper()
-        if su == stem_u or su.endswith("_" + stem_u):
+        ok = su == stem_u or su.endswith("_" + stem_u)
+        if not ok and len(stem_compact) >= 4:
+            su_c = su.replace("_", "")
+            ok = su_c == stem_compact or su.endswith("_" + stem_compact)
+        if ok:
             matches.append(sk)
     matches.sort(key=lambda s: (len(s), s))
     return matches
@@ -1299,11 +1307,13 @@ def resolve_status_icon(
     for ext in (".bmp", ".tga", ".png"):
         candidates.append(("item", stem + ext))
 
-    seen: set[str] = set()
+    # Key by (source, fn): a miss in effect/<stem>.bmp must not block item/<stem>.bmp.
+    seen: set[tuple[str, str]] = set()
     for source, fn in candidates:
-        if fn in seen:
+        key = (source, fn)
+        if key in seen:
             continue
-        seen.add(fn)
+        seen.add(key)
         if source in {"imginfo", "effect"}:
             hit = effect_icons.get(fn)
             if hit is None and source == "imginfo":
