@@ -8,12 +8,13 @@ Reads data.ini priority (first wins). Writes reports under --out-dir:
   client_item_icons.jsonl
   client_item_sprites.jsonl
   client_item_info.jsonl      # from System/itemInfo_EN.lua when present
+  client_item_server_gaps.jsonl  # server items missing itemInfo or assets
   client_mob_sprites.jsonl
   client_npc_sprites.jsonl
 
 Example:
   python3 tools/export_client_inventory.py \\
-      --cli-root . --out-dir ../ozro-data/reports
+      --cli-root . --out-dir ../ozro-data/reports --rathena ../rathena
 """
 
 from __future__ import annotations
@@ -29,11 +30,19 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from grf import Grf, GrfError  # noqa: E402
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 ITEM_INFO_CANDIDATES = (
     "patch/System/itemInfo_EN.lua",
     "System/itemInfo_EN.lua",
+)
+
+SERVER_ITEM_DB_FILES = (
+    "db/re/item_db.yml",
+    "db/re/item_db_equip.yml",
+    "db/re/item_db_etc.yml",
+    "db/re/item_db_usable.yml",
+    "db/import/item_db.yml",
 )
 
 
@@ -381,11 +390,15 @@ def parse_item_info(path: Path) -> list[dict]:
         body = m.group(2)
 
         def field_str(name: str) -> str | None:
-            mm = re.search(rf'{name}\s*=\s*"((?:\\.|[^"\\])*)"', body)
+            # Avoid matching unidentifiedX when asking for identifiedX
+            # (unidentifiedResourceName ends with identifiedResourceName).
+            mm = re.search(
+                rf'(?<![A-Za-z]){name}\s*=\s*"((?:\\.|[^"\\])*)"', body
+            )
             return mm.group(1) if mm else None
 
         def field_int(name: str) -> int | None:
-            mm = re.search(rf"{name}\s*=\s*(-?\d+)", body)
+            mm = re.search(rf"(?<![A-Za-z]){name}\s*=\s*(-?\d+)", body)
             return int(mm.group(1)) if mm else None
 
         rows.append(
@@ -405,21 +418,26 @@ def enrich_item_info(
     icons: list[dict],
     sprites: list[dict],
 ) -> list[dict]:
-    icon_by = {r["resource_name"]: r for r in icons}
-    spr_by = {r["sprite_stem"]: r for r in sprites}
+    # ResourceName lookup is case-insensitive (GRF stems vary in case).
+    icon_by = {r["resource_name"].lower(): r for r in icons}
+    spr_by = {r["sprite_stem"].lower(): r for r in sprites}
     out = []
     for row in info_rows:
         ident = row.get("identified_resource_name") or ""
         unid = row.get("unidentified_resource_name") or ""
-        icon = icon_by.get(ident)
-        spr = spr_by.get(ident)
+        icon = icon_by.get(ident.lower()) if ident else None
+        spr = spr_by.get(ident.lower()) if ident else None
+        has_icon = bool(icon and icon.get("has_item"))
+        has_coll = bool(icon and icon.get("has_collection"))
+        has_spr = bool(spr and spr.get("has_spr") and spr.get("has_act"))
         enriched = dict(row)
-        enriched["has_item_icon"] = bool(icon and icon.get("has_item"))
-        enriched["has_collection"] = bool(icon and icon.get("has_collection"))
-        enriched["has_sprite"] = bool(spr and spr.get("has_spr") and spr.get("has_act"))
+        enriched["has_item_icon"] = has_icon
+        enriched["has_collection"] = has_coll
+        enriched["has_sprite"] = has_spr
+        enriched["assets_complete"] = has_icon and has_coll and has_spr
         if unid and unid != ident:
-            u_icon = icon_by.get(unid)
-            u_spr = spr_by.get(unid)
+            u_icon = icon_by.get(unid.lower())
+            u_spr = spr_by.get(unid.lower())
             enriched["unidentified_has_item_icon"] = bool(
                 u_icon and u_icon.get("has_item")
             )
@@ -436,6 +454,54 @@ def find_item_info(cli_root: Path) -> Path | None:
         if p.is_file():
             return p
     return None
+
+
+def load_server_item_ids(rathena: Path) -> list[int]:
+    ids: set[int] = set()
+    for rel in SERVER_ITEM_DB_FILES:
+        path = rathena / rel
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for m in re.finditer(r"^\s+-\s+Id:\s*(\d+)", text, re.M):
+            ids.add(int(m.group(1)))
+    return sorted(ids)
+
+
+def build_server_item_gaps(
+    server_ids: list[int],
+    item_info: list[dict],
+) -> list[dict]:
+    by_id = {r["item_id"]: r for r in item_info}
+    gaps: list[dict] = []
+    for iid in server_ids:
+        row = by_id.get(iid)
+        if row is None:
+            gaps.append(
+                {
+                    "item_id": iid,
+                    "reason": "no_iteminfo",
+                    "identified_resource_name": None,
+                    "has_item_icon": False,
+                    "has_collection": False,
+                    "has_sprite": False,
+                    "assets_complete": False,
+                }
+            )
+            continue
+        if not row.get("assets_complete"):
+            gaps.append(
+                {
+                    "item_id": iid,
+                    "reason": "missing_assets",
+                    "identified_resource_name": row.get("identified_resource_name"),
+                    "has_item_icon": bool(row.get("has_item_icon")),
+                    "has_collection": bool(row.get("has_collection")),
+                    "has_sprite": bool(row.get("has_sprite")),
+                    "assets_complete": False,
+                }
+            )
+    return gaps
 
 
 def main() -> int:
@@ -457,6 +523,12 @@ def main() -> int:
         default=None,
         help="default: <cli-root>/patch/data.ini",
     )
+    ap.add_argument(
+        "--rathena",
+        type=Path,
+        default=None,
+        help="default: <cli-root>/../rathena — enables client_item_server_gaps.jsonl",
+    )
     args = ap.parse_args()
     cli_root: Path = args.cli_root.resolve()
     out_dir: Path = (
@@ -468,6 +540,11 @@ def main() -> int:
         args.data_ini.resolve()
         if args.data_ini
         else (cli_root / "patch" / "data.ini")
+    )
+    rathena: Path = (
+        args.rathena.resolve()
+        if args.rathena
+        else (cli_root.parent / "rathena").resolve()
     )
 
     try:
@@ -496,6 +573,15 @@ def main() -> int:
                 parse_item_info(item_info_path), icons, item_spr
             )
 
+        server_gaps: list[dict] = []
+        server_ids: list[int] = []
+        if rathena.is_dir():
+            print(f"loading server item ids: {rathena}", flush=True)
+            server_ids = load_server_item_ids(rathena)
+            server_gaps = build_server_item_gaps(server_ids, item_info)
+        else:
+            print(f"skip server gaps (rathena missing): {rathena}", flush=True)
+
         out_dir.mkdir(parents=True, exist_ok=True)
         write_jsonl(out_dir / "client_maps.jsonl", maps)
         write_jsonl(out_dir / "client_item_icons.jsonl", icons)
@@ -504,11 +590,19 @@ def main() -> int:
         write_jsonl(out_dir / "client_npc_sprites.jsonl", npc_spr)
         if item_info:
             write_jsonl(out_dir / "client_item_info.jsonl", item_info)
+        if server_gaps or server_ids:
+            write_jsonl(out_dir / "client_item_server_gaps.jsonl", server_gaps)
 
         maps_alias = sum(1 for r in maps if r.get("alias_of"))
         maps_alias_complete = sum(
             1 for r in maps if r.get("alias_of") and r["complete"]
         )
+        items_server = len(server_ids)
+        items_no_iteminfo = sum(1 for g in server_gaps if g["reason"] == "no_iteminfo")
+        items_missing_assets = sum(
+            1 for g in server_gaps if g["reason"] == "missing_assets"
+        )
+        items_server_ok = items_server - items_no_iteminfo - items_missing_assets
         meta = {
             "schema_version": SCHEMA_VERSION,
             "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -517,6 +611,7 @@ def main() -> int:
             "grf_paths": {m["label"]: m["path"] for m in grf_meta},
             "grfs": grf_meta,
             "active_path_count": len(active),
+            "rathena": str(rathena) if server_ids else None,
             "counts": {
                 "maps": len(maps),
                 "maps_complete": sum(1 for r in maps if r["complete"]),
@@ -525,6 +620,13 @@ def main() -> int:
                 "item_icons": len(icons),
                 "item_sprites": len(item_spr),
                 "item_info": len(item_info),
+                "item_info_assets_complete": sum(
+                    1 for r in item_info if r.get("assets_complete")
+                ),
+                "items_server": items_server,
+                "items_server_ok": items_server_ok,
+                "items_no_iteminfo": items_no_iteminfo,
+                "items_missing_assets": items_missing_assets,
                 "mob_sprites": len(mob_spr),
                 "npc_sprites": len(npc_spr),
             },
@@ -534,6 +636,7 @@ def main() -> int:
                 "client_item_icons.jsonl",
                 "client_item_sprites.jsonl",
                 "client_item_info.jsonl" if item_info else None,
+                "client_item_server_gaps.jsonl" if server_ids else None,
                 "client_mob_sprites.jsonl",
                 "client_npc_sprites.jsonl",
             ],

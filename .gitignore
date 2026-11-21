@@ -7,3 +7,5 @@ dist/*.zip
 # Intentos fallidos de actualización; no versionar
 patch2/
 patch3/
+
+.tmp/
