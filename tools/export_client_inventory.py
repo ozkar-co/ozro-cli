@@ -10,6 +10,8 @@ Reads data.ini priority (first wins). Writes reports under --out-dir:
   client_item_info.jsonl      # from System/itemInfo_EN.lua when present
   client_item_server_gaps.jsonl  # server items missing itemInfo or assets
   client_mob_sprites.jsonl
+  client_mob_server_gaps.jsonl   # server mobs missing identity/jobname/sprite
+  client_mob_act_gaps.jsonl      # mob ACT→wav refs missing from client stack
   client_npc_sprites.jsonl
 
 Example:
@@ -30,7 +32,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from grf import Grf, GrfError  # noqa: E402
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
+
+# ACT sound events store null-terminated filenames (may include spaces).
+_WAV_NULL_TERM_RE = re.compile(
+    rb"([A-Za-z0-9_][A-Za-z0-9_\- ]{0,63}\.wav)\x00", re.I
+)
 
 ITEM_INFO_CANDIDATES = (
     "patch/System/itemInfo_EN.lua",
@@ -43,6 +50,21 @@ SERVER_ITEM_DB_FILES = (
     "db/re/item_db_etc.yml",
     "db/re/item_db_usable.yml",
     "db/import/item_db.yml",
+)
+
+SERVER_MOB_DB_FILES = (
+    "db/re/mob_db.yml",
+    "db/import/mob_db.yml",
+)
+
+NPCIDENTITY_CANDIDATES = (
+    "data/luafiles514/lua files/datainfo/npcidentity.lub",
+    "data/lua files/datainfo/npcidentity.lub",
+)
+
+JOBNAME_CANDIDATES = (
+    "data/luafiles514/lua files/datainfo/jobname.lub",
+    "data/lua files/datainfo/jobname.lub",
 )
 
 
@@ -504,6 +526,204 @@ def build_server_item_gaps(
     return gaps
 
 
+def load_server_mobs(rathena: Path) -> list[dict]:
+    """Return [{mob_id, aegis_name}, ...] from mob_db YAML."""
+    by_id: dict[int, str] = {}
+    for rel in SERVER_MOB_DB_FILES:
+        path = rathena / rel
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        cur: int | None = None
+        for line in text.splitlines():
+            m = re.match(r"^\s+-\s+Id:\s*(\d+)", line)
+            if m:
+                cur = int(m.group(1))
+                by_id.setdefault(cur, "")
+                continue
+            m = re.match(r"^\s+AegisName:\s*(\S+)", line)
+            if m and cur is not None:
+                by_id[cur] = m.group(1)
+    return [{"mob_id": mid, "aegis_name": an} for mid, an in sorted(by_id.items())]
+
+
+def export_gr2_stems(active: dict[str, tuple[str, str]]) -> set[str]:
+    """Lowercase stems of .gr2 files anywhere under data/."""
+    out: set[str] = set()
+    for key in active:
+        if ext_of(key) != "gr2":
+            continue
+        out.add(stem_of(key).lower())
+    return out
+
+
+def index_wav_basenames(active: dict[str, tuple[str, str]]) -> set[str]:
+    """Lowercase basenames of active data/wav/** entries."""
+    out: set[str] = set()
+    for key in active:
+        if not key.startswith("data/wav/") or ext_of(key) != "wav":
+            continue
+        out.add(basename(key).lower())
+    return out
+
+
+def extract_act_wav_refs(act_blob: bytes) -> list[str]:
+    """Unique .wav basenames embedded in an ACT (null-terminated sound events)."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for m in _WAV_NULL_TERM_RE.finditer(act_blob):
+        name = m.group(1).decode("ascii", errors="ignore").lower()
+        if name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    return ordered
+
+
+def enrich_sprite_act_deps(
+    sprites: list[dict],
+    active: dict[str, tuple[str, str]],
+    grfs: dict[str, Grf],
+    wav_names: set[str],
+) -> tuple[list[dict], list[dict]]:
+    """Attach ACT→wav coverage to sprite rows; return (rows, act_gaps).
+
+    Gaps are one row per (sprite_stem, missing wav).
+    """
+    gaps: list[dict] = []
+    out: list[dict] = []
+    for row in sprites:
+        enriched = dict(row)
+        refs: list[str] = []
+        missing: list[str] = []
+        act_path = (row.get("paths") or {}).get("act")
+        if row.get("has_act") and act_path:
+            blob = read_active_file(active, grfs, act_path)
+            if blob is not None:
+                refs = extract_act_wav_refs(blob)
+                missing = [w for w in refs if w not in wav_names]
+        enriched["wav_refs"] = refs
+        enriched["wav_missing"] = missing
+        enriched["act_deps_complete"] = bool(row.get("has_act")) and not missing
+        out.append(enriched)
+        for wav in missing:
+            gaps.append(
+                {
+                    "sprite_stem": row["sprite_stem"],
+                    "act_path": act_path,
+                    "wav": wav,
+                    "reason": "missing_wav",
+                }
+            )
+    return out, gaps
+
+
+def parse_npcidentity(data: bytes) -> dict[int, str]:
+    """id -> JT_* name from text npcidentity.lub."""
+    text = data.decode("cp949", errors="replace")
+    out: dict[int, str] = {}
+    for m in re.finditer(r"(JT_\w+)\s*=\s*(\d+)", text):
+        out[int(m.group(2))] = m.group(1)
+    return out
+
+
+def parse_jobname(data: bytes) -> dict[str, str]:
+    """JT_* -> sprite name from text jobname.lub."""
+    text = data.decode("cp949", errors="replace")
+    out: dict[str, str] = {}
+    for m in re.finditer(r"\[jobtbl\.(JT_\w+)\]\s*=\s*\"([^\"]+)\"", text):
+        out[m.group(1)] = m.group(2)
+    return out
+
+
+def find_active_lub(
+    active: dict[str, tuple[str, str]],
+    grfs: dict[str, Grf],
+    candidates: tuple[str, ...],
+) -> bytes | None:
+    for rel in candidates:
+        raw = read_active_file(active, grfs, rel)
+        if raw is not None:
+            return raw
+    return None
+
+
+def mob_sprite_complete(
+    sprite_name: str,
+    mob_spr_by: dict[str, dict],
+    gr2_stems: set[str],
+) -> tuple[bool, str]:
+    """Return (ok, kind) where kind is spr_act|gr2|missing."""
+    name = sprite_name.strip()
+    if not name:
+        return False, "missing"
+    lower = name.lower()
+    if lower.endswith(".gr2"):
+        stem = lower[:-4]
+        if stem in gr2_stems:
+            return True, "gr2"
+        return False, "missing"
+    slot = mob_spr_by.get(lower)
+    if slot and slot.get("has_spr") and slot.get("has_act"):
+        return True, "spr_act"
+    return False, "missing"
+
+
+def build_server_mob_gaps(
+    server_mobs: list[dict],
+    id_to_jt: dict[int, str],
+    jt_to_spr: dict[str, str],
+    mob_sprites: list[dict],
+    gr2_stems: set[str],
+) -> list[dict]:
+    mob_spr_by = {r["sprite_stem"].lower(): r for r in mob_sprites}
+    gaps: list[dict] = []
+    for row in server_mobs:
+        mid = row["mob_id"]
+        aegis = row.get("aegis_name") or ""
+        jt = id_to_jt.get(mid)
+        if not jt:
+            gaps.append(
+                {
+                    "mob_id": mid,
+                    "aegis_name": aegis or None,
+                    "reason": "no_identity",
+                    "jt": None,
+                    "sprite_name": None,
+                    "sprite_kind": None,
+                    "has_sprite": False,
+                }
+            )
+            continue
+        spr = jt_to_spr.get(jt)
+        if not spr:
+            gaps.append(
+                {
+                    "mob_id": mid,
+                    "aegis_name": aegis or None,
+                    "reason": "no_jobname",
+                    "jt": jt,
+                    "sprite_name": None,
+                    "sprite_kind": None,
+                    "has_sprite": False,
+                }
+            )
+            continue
+        ok, kind = mob_sprite_complete(spr, mob_spr_by, gr2_stems)
+        if not ok:
+            gaps.append(
+                {
+                    "mob_id": mid,
+                    "aegis_name": aegis or None,
+                    "reason": "missing_sprite",
+                    "jt": jt,
+                    "sprite_name": spr,
+                    "sprite_kind": kind,
+                    "has_sprite": False,
+                }
+            )
+    return gaps
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -527,7 +747,7 @@ def main() -> int:
         "--rathena",
         type=Path,
         default=None,
-        help="default: <cli-root>/../rathena — enables client_item_server_gaps.jsonl",
+        help="default: <cli-root>/../rathena — enables item/mob server gap reports",
     )
     args = ap.parse_args()
     cli_root: Path = args.cli_root.resolve()
@@ -564,6 +784,21 @@ def main() -> int:
         mob_spr = export_sprite_dir(active, {"몬스터", "monster"})
         print("exporting npc sprites…", flush=True)
         npc_spr = export_sprite_dir(active, {"npc", "엔피씨"})
+        gr2_stems = export_gr2_stems(active)
+        wav_names = index_wav_basenames(active)
+        print(
+            f"scanning mob ACT→wav deps (wavs indexed={len(wav_names)})…",
+            flush=True,
+        )
+        mob_spr, mob_act_gaps = enrich_sprite_act_deps(
+            mob_spr, active, grfs, wav_names
+        )
+        print(
+            f"  mob act gaps={len(mob_act_gaps)} "
+            f"stems_incomplete="
+            f"{sum(1 for r in mob_spr if r.get('has_act') and not r.get('act_deps_complete'))}",
+            flush=True,
+        )
 
         item_info_path = find_item_info(cli_root)
         item_info: list[dict] = []
@@ -573,12 +808,33 @@ def main() -> int:
                 parse_item_info(item_info_path), icons, item_spr
             )
 
+        print("parsing npcidentity / jobname…", flush=True)
+        id_to_jt: dict[int, str] = {}
+        jt_to_spr: dict[str, str] = {}
+        ident_raw = find_active_lub(active, grfs, NPCIDENTITY_CANDIDATES)
+        job_raw = find_active_lub(active, grfs, JOBNAME_CANDIDATES)
+        if ident_raw:
+            id_to_jt = parse_npcidentity(ident_raw)
+        if job_raw:
+            jt_to_spr = parse_jobname(job_raw)
+        print(
+            f"  identity ids={len(id_to_jt)} jobname entries={len(jt_to_spr)} "
+            f"gr2_stems={len(gr2_stems)}",
+            flush=True,
+        )
+
         server_gaps: list[dict] = []
         server_ids: list[int] = []
+        server_mobs: list[dict] = []
+        mob_gaps: list[dict] = []
         if rathena.is_dir():
-            print(f"loading server item ids: {rathena}", flush=True)
+            print(f"loading server dbs: {rathena}", flush=True)
             server_ids = load_server_item_ids(rathena)
             server_gaps = build_server_item_gaps(server_ids, item_info)
+            server_mobs = load_server_mobs(rathena)
+            mob_gaps = build_server_mob_gaps(
+                server_mobs, id_to_jt, jt_to_spr, mob_spr, gr2_stems
+            )
         else:
             print(f"skip server gaps (rathena missing): {rathena}", flush=True)
 
@@ -587,11 +843,14 @@ def main() -> int:
         write_jsonl(out_dir / "client_item_icons.jsonl", icons)
         write_jsonl(out_dir / "client_item_sprites.jsonl", item_spr)
         write_jsonl(out_dir / "client_mob_sprites.jsonl", mob_spr)
+        write_jsonl(out_dir / "client_mob_act_gaps.jsonl", mob_act_gaps)
         write_jsonl(out_dir / "client_npc_sprites.jsonl", npc_spr)
         if item_info:
             write_jsonl(out_dir / "client_item_info.jsonl", item_info)
         if server_gaps or server_ids:
             write_jsonl(out_dir / "client_item_server_gaps.jsonl", server_gaps)
+        if mob_gaps or server_mobs:
+            write_jsonl(out_dir / "client_mob_server_gaps.jsonl", mob_gaps)
 
         maps_alias = sum(1 for r in maps if r.get("alias_of"))
         maps_alias_complete = sum(
@@ -603,6 +862,21 @@ def main() -> int:
             1 for g in server_gaps if g["reason"] == "missing_assets"
         )
         items_server_ok = items_server - items_no_iteminfo - items_missing_assets
+        mobs_server = len(server_mobs)
+        mobs_no_identity = sum(1 for g in mob_gaps if g["reason"] == "no_identity")
+        mobs_no_jobname = sum(1 for g in mob_gaps if g["reason"] == "no_jobname")
+        mobs_missing_sprite = sum(
+            1 for g in mob_gaps if g["reason"] == "missing_sprite"
+        )
+        mobs_server_ok = (
+            mobs_server - mobs_no_identity - mobs_no_jobname - mobs_missing_sprite
+        )
+        mobs_act_incomplete = sum(
+            1
+            for r in mob_spr
+            if r.get("has_act") and not r.get("act_deps_complete")
+        )
+        mob_wav_missing_unique = sorted({g["wav"] for g in mob_act_gaps})
         meta = {
             "schema_version": SCHEMA_VERSION,
             "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -611,7 +885,7 @@ def main() -> int:
             "grf_paths": {m["label"]: m["path"] for m in grf_meta},
             "grfs": grf_meta,
             "active_path_count": len(active),
-            "rathena": str(rathena) if server_ids else None,
+            "rathena": str(rathena) if (server_ids or server_mobs) else None,
             "counts": {
                 "maps": len(maps),
                 "maps_complete": sum(1 for r in maps if r["complete"]),
@@ -628,6 +902,16 @@ def main() -> int:
                 "items_no_iteminfo": items_no_iteminfo,
                 "items_missing_assets": items_missing_assets,
                 "mob_sprites": len(mob_spr),
+                "mob_gr2_stems": len(gr2_stems),
+                "mob_wavs_indexed": len(wav_names),
+                "mobs_act_deps_incomplete": mobs_act_incomplete,
+                "mobs_act_gap_rows": len(mob_act_gaps),
+                "mobs_act_wav_missing_unique": len(mob_wav_missing_unique),
+                "mobs_server": mobs_server,
+                "mobs_server_ok": mobs_server_ok,
+                "mobs_no_identity": mobs_no_identity,
+                "mobs_no_jobname": mobs_no_jobname,
+                "mobs_missing_sprite": mobs_missing_sprite,
                 "npc_sprites": len(npc_spr),
             },
             "outputs": [
@@ -638,6 +922,8 @@ def main() -> int:
                 "client_item_info.jsonl" if item_info else None,
                 "client_item_server_gaps.jsonl" if server_ids else None,
                 "client_mob_sprites.jsonl",
+                "client_mob_act_gaps.jsonl",
+                "client_mob_server_gaps.jsonl" if server_mobs else None,
                 "client_npc_sprites.jsonl",
             ],
         }
