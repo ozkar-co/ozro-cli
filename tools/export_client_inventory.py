@@ -13,6 +13,7 @@ Reads data.ini priority (first wins). Writes reports under --out-dir:
   client_mob_server_gaps.jsonl   # server mobs missing identity/jobname/sprite
   client_mob_act_gaps.jsonl      # mob ACT→wav refs missing from client stack
   client_npc_sprites.jsonl
+  client_npc_act_gaps.jsonl      # npc ACT→wav refs missing from client stack
 
 Example:
   python3 tools/export_client_inventory.py \\
@@ -32,7 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from grf import Grf, GrfError  # noqa: E402
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # ACT sound events store null-terminated filenames (may include spaces).
 _WAV_NULL_TERM_RE = re.compile(
@@ -787,7 +788,7 @@ def main() -> int:
         gr2_stems = export_gr2_stems(active)
         wav_names = index_wav_basenames(active)
         print(
-            f"scanning mob ACT→wav deps (wavs indexed={len(wav_names)})…",
+            f"scanning mob/npc ACT→wav deps (wavs indexed={len(wav_names)})…",
             flush=True,
         )
         mob_spr, mob_act_gaps = enrich_sprite_act_deps(
@@ -797,6 +798,15 @@ def main() -> int:
             f"  mob act gaps={len(mob_act_gaps)} "
             f"stems_incomplete="
             f"{sum(1 for r in mob_spr if r.get('has_act') and not r.get('act_deps_complete'))}",
+            flush=True,
+        )
+        npc_spr, npc_act_gaps = enrich_sprite_act_deps(
+            npc_spr, active, grfs, wav_names
+        )
+        print(
+            f"  npc act gaps={len(npc_act_gaps)} "
+            f"stems_incomplete="
+            f"{sum(1 for r in npc_spr if r.get('has_act') and not r.get('act_deps_complete'))}",
             flush=True,
         )
 
@@ -845,6 +855,7 @@ def main() -> int:
         write_jsonl(out_dir / "client_mob_sprites.jsonl", mob_spr)
         write_jsonl(out_dir / "client_mob_act_gaps.jsonl", mob_act_gaps)
         write_jsonl(out_dir / "client_npc_sprites.jsonl", npc_spr)
+        write_jsonl(out_dir / "client_npc_act_gaps.jsonl", npc_act_gaps)
         if item_info:
             write_jsonl(out_dir / "client_item_info.jsonl", item_info)
         if server_gaps or server_ids:
@@ -913,6 +924,15 @@ def main() -> int:
                 "mobs_no_jobname": mobs_no_jobname,
                 "mobs_missing_sprite": mobs_missing_sprite,
                 "npc_sprites": len(npc_spr),
+                "npcs_act_deps_incomplete": sum(
+                    1
+                    for r in npc_spr
+                    if r.get("has_act") and not r.get("act_deps_complete")
+                ),
+                "npcs_act_gap_rows": len(npc_act_gaps),
+                "npcs_act_wav_missing_unique": len(
+                    {g["wav"] for g in npc_act_gaps}
+                ),
             },
             "outputs": [
                 "client_grf_index_meta.json",
@@ -925,6 +945,7 @@ def main() -> int:
                 "client_mob_act_gaps.jsonl",
                 "client_mob_server_gaps.jsonl" if server_mobs else None,
                 "client_npc_sprites.jsonl",
+                "client_npc_act_gaps.jsonl",
             ],
         }
         meta["outputs"] = [x for x in meta["outputs"] if x]
