@@ -133,7 +133,56 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
             f.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
-def export_maps(active: dict[str, tuple[str, str]]) -> list[dict]:
+def parse_resnametable(data: bytes) -> dict[str, dict[str, str]]:
+    """Parse data/resnametable.txt → alias_stem → {ext: target_stem}.
+
+    Lines look like: airplane_01.rsw#airplane.rsw#
+    """
+    text = data.decode("cp949", errors="replace")
+    out: dict[str, dict[str, str]] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("//") or line.startswith("#"):
+            continue
+        parts = [p for p in line.split("#") if p]
+        if len(parts) < 2:
+            continue
+        src, dst = parts[0].strip(), parts[1].strip()
+        src_ext, dst_ext = ext_of(src), ext_of(dst)
+        if src_ext not in {"rsw", "gat", "gnd"}:
+            continue
+        if dst_ext and dst_ext != src_ext:
+            continue
+        alias = stem_of(src).lower()
+        target = stem_of(dst).lower()
+        if not alias or not target or alias == target:
+            continue
+        out.setdefault(alias, {})[src_ext] = target
+    return out
+
+
+def read_active_file(
+    active: dict[str, tuple[str, str]],
+    grfs: dict[str, Grf],
+    key: str,
+) -> bytes | None:
+    hit = active.get(norm_path(key))
+    if not hit:
+        return None
+    label, orig = hit
+    grf = grfs.get(label)
+    if grf is None:
+        return None
+    try:
+        return grf.read(grf.find(orig))
+    except GrfError:
+        return None
+
+
+def export_maps(
+    active: dict[str, tuple[str, str]],
+    grfs: dict[str, Grf] | None = None,
+) -> list[dict]:
     rsw: dict[str, str] = {}
     gat: dict[str, str] = {}
     gnd: dict[str, str] = {}
@@ -155,30 +204,50 @@ def export_maps(active: dict[str, tuple[str, str]]) -> list[dict]:
         if "/map/" in key and ext_of(key) in ("bmp", "tga", "png", "jpg"):
             minimaps.add(stem_of(key).lower())
 
-    maps = sorted(set(rsw) | set(gat) | set(gnd))
+    aliases: dict[str, dict[str, str]] = {}
+    if grfs:
+        raw = read_active_file(active, grfs, "data/resnametable.txt")
+        if raw:
+            aliases = parse_resnametable(raw)
+
+    physical = set(rsw) | set(gat) | set(gnd)
+    maps = sorted(physical | set(aliases), key=lambda s: s.lower())
     rows = []
     for mid in maps:
-        has_rsw = mid in rsw
-        has_gat = mid in gat
-        has_gnd = mid in gnd
-        winners = {}
-        if has_rsw:
-            winners["rsw"] = rsw[mid]
-        if has_gat:
-            winners["gat"] = gat[mid]
-        if has_gnd:
-            winners["gnd"] = gnd[mid]
-        rows.append(
-            {
-                "map_id": mid,
-                "has_rsw": has_rsw,
-                "has_gat": has_gat,
-                "has_gnd": has_gnd,
-                "complete": has_rsw and has_gat and has_gnd,
-                "winner_grf": winners,
-                "minimap_present": mid.lower() in minimaps,
-            }
-        )
+        alias = aliases.get(mid.lower(), {})
+        resolved: dict[str, str] = {}
+        winners: dict[str, str] = {}
+        via_alias: dict[str, str] = {}
+
+        for ext, bucket in (("rsw", rsw), ("gat", gat), ("gnd", gnd)):
+            if mid in bucket:
+                resolved[ext] = mid
+                winners[ext] = bucket[mid]
+            elif ext in alias and alias[ext] in bucket:
+                target = alias[ext]
+                resolved[ext] = target
+                winners[ext] = bucket[target]
+                via_alias[ext] = target
+
+        has_rsw = "rsw" in resolved
+        has_gat = "gat" in resolved
+        has_gnd = "gnd" in resolved
+        row = {
+            "map_id": mid,
+            "has_rsw": has_rsw,
+            "has_gat": has_gat,
+            "has_gnd": has_gnd,
+            "complete": has_rsw and has_gat and has_gnd,
+            "winner_grf": winners,
+            "minimap_present": mid.lower() in minimaps
+            or any(t.lower() in minimaps for t in via_alias.values()),
+        }
+        if via_alias:
+            row["alias_of"] = via_alias
+            row["physical"] = mid in physical and mid in rsw and mid in gat and mid in gnd
+        else:
+            row["physical"] = has_rsw and has_gat and has_gnd
+        rows.append(row)
     return rows
 
 
@@ -406,9 +475,10 @@ def main() -> int:
         if not ini_order:
             raise GrfError(f"no GRF entries in {ini_path}")
         active, grf_meta = build_index(cli_root, ini_order)
+        grfs = {m["label"]: Grf(cli_root / m["path"]) for m in grf_meta}
 
         print("exporting maps…", flush=True)
-        maps = export_maps(active)
+        maps = export_maps(active, grfs)
         print("exporting item icons…", flush=True)
         icons = export_item_icons(active)
         print("exporting item sprites…", flush=True)
@@ -435,6 +505,10 @@ def main() -> int:
         if item_info:
             write_jsonl(out_dir / "client_item_info.jsonl", item_info)
 
+        maps_alias = sum(1 for r in maps if r.get("alias_of"))
+        maps_alias_complete = sum(
+            1 for r in maps if r.get("alias_of") and r["complete"]
+        )
         meta = {
             "schema_version": SCHEMA_VERSION,
             "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -446,6 +520,8 @@ def main() -> int:
             "counts": {
                 "maps": len(maps),
                 "maps_complete": sum(1 for r in maps if r["complete"]),
+                "maps_alias": maps_alias,
+                "maps_alias_complete": maps_alias_complete,
                 "item_icons": len(icons),
                 "item_sprites": len(item_spr),
                 "item_info": len(item_info),
