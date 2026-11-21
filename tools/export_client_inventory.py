@@ -34,7 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from grf import Grf, GrfError  # noqa: E402
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # ACT sound events store null-terminated filenames (may include spaces).
 _WAV_NULL_TERM_RE = re.compile(
@@ -651,6 +651,45 @@ def jobname_sprite_stems(jt_to_spr: dict[str, str]) -> set[str]:
     return out
 
 
+def _jobname_stem(spr: str) -> str:
+    name = spr.strip()
+    lower = name.lower()
+    if lower.endswith(".gr2"):
+        lower = lower[:-4]
+    return lower
+
+
+def attach_npc_sprite_ids(
+    sprites: list[dict],
+    id_to_jt: dict[int, str],
+    jt_to_spr: dict[str, str],
+) -> list[dict]:
+    """Add numeric sprite_ids (+ jt_names) to each NPC sprite row.
+
+    Scripts reference NPCs by numeric id (or JT constant). npcidentity maps
+    id→JT_*; jobname maps JT_*→stem. Several ids may share one stem.
+    """
+    stem_to_ids: dict[str, list[int]] = {}
+    stem_to_jt: dict[str, list[str]] = {}
+    for sid, jt in id_to_jt.items():
+        spr = jt_to_spr.get(jt)
+        if not spr:
+            continue
+        stem = _jobname_stem(spr)
+        stem_to_ids.setdefault(stem, []).append(sid)
+        stem_to_jt.setdefault(stem, []).append(jt)
+    out: list[dict] = []
+    for row in sprites:
+        enriched = dict(row)
+        stem = row["sprite_stem"].lower()
+        ids = sorted(stem_to_ids.get(stem, []))
+        jts = sorted(set(stem_to_jt.get(stem, [])))
+        enriched["sprite_ids"] = ids
+        enriched["jt_names"] = jts
+        out.append(enriched)
+    return out
+
+
 def filter_sprites_by_stems(
     sprites: list[dict], allowed: set[str]
 ) -> list[dict]:
@@ -878,10 +917,13 @@ def main() -> int:
         wired_stems = jobname_sprite_stems(jt_to_spr)
         # Inventory NPCs = usable only (referenced by jobname), not loose GRF files.
         npc_spr = filter_sprites_by_stems(npc_spr_all, wired_stems)
+        npc_spr = attach_npc_sprite_ids(npc_spr, id_to_jt, jt_to_spr)
+        npc_with_ids = sum(1 for r in npc_spr if r.get("sprite_ids"))
         print(
             f"  identity ids={len(id_to_jt)} jobname entries={len(jt_to_spr)} "
             f"gr2_stems={len(gr2_stems)} "
-            f"npc_files={len(npc_spr_all)} npc_wired={len(npc_spr)}",
+            f"npc_files={len(npc_spr_all)} npc_wired={len(npc_spr)} "
+            f"npc_with_sprite_ids={npc_with_ids}",
             flush=True,
         )
 
@@ -1015,6 +1057,9 @@ def main() -> int:
                 "npc_sprites": len(npc_spr),
                 "npc_sprites_files": len(npc_spr_all),
                 "npc_sprites_unwired": len(npc_spr_all) - len(npc_spr),
+                "npc_sprites_with_ids": sum(
+                    1 for r in npc_spr if r.get("sprite_ids")
+                ),
                 "npcs_act_deps_incomplete": sum(
                     1
                     for r in npc_spr

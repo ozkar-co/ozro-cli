@@ -115,6 +115,7 @@ classId
 
 - **Mobs:** cruce `mob_db` ↔ identity ↔ jobname ↔ spr/act|gr2 → `client_mob_server_gaps.jsonl`.
 - **NPCs (schema ≥6):** `client_npc_sprites.jsonl` lista solo stems **referenciados por jobname** (usables). Meta: `npc_sprites_files` / `npc_sprites_unwired` para lo suelto en GRF.
+- **NPCs (schema ≥8):** cada fila incluye `sprite_ids` (ints de `npcidentity`) y `jt_names` para join directo desde headers de script (`sprite_id` numérico).
 
 Reasons mob gap: `no_identity` | `no_jobname` | `missing_sprite`.
 
