@@ -137,6 +137,22 @@ El script extrae:
 El compose del cliente web monta `System/` y `data/` en `/app/System` y
 `/app/data`, así que el Lua VM los encuentra ahí.
 
+## Atlases web (ozro-site)
+
+Genera iconos/ilustraciones de items, sprites de mobs/NPCs y el `manifest.json`
+para el sitio, con **dedup por ResourceName / stem** (varios ids → un solo tile)
+y composición ACT (biolab/humanoides con cabeza):
+
+```bash
+python3 tools/build_web_atlases.py --out tmp/web-assets
+# opcional: --domains items,mobs,npcs --client-dir /mnt/games/OzRo --limit 100
+```
+
+Copia a `../ozro-site/assets/` (icons, illustrations, mobs/sprites, npcs/sprites,
+`manifest.json`, `alias-map.json`). Las cartas siguen en `tools/build_card_book.py`.
+
+Overrides PNG para modelos `.gr2`: `data/overrides/mobs/` (ver README ahí).
+
 ## Enviar cambios
 
 1. Extraer, editar y reempaquetar el GRF correspondiente en `patch/`, y probar.
