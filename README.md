@@ -137,21 +137,26 @@ El script extrae:
 El compose del cliente web monta `System/` y `data/` en `/app/System` y
 `/app/data`, así que el Lua VM los encuentra ahí.
 
-## Atlases web (ozro-site)
+## Assets web (ozro-site)
 
-Genera iconos/ilustraciones de items, sprites de mobs/NPCs y el `manifest.json`
-para el sitio, con **dedup por ResourceName / stem** (varios ids → un solo tile)
-y composición ACT (biolab/humanoides con cabeza):
+Todo el build de assets del sitio vive aquí (ozro-site no tiene generadores):
 
 ```bash
+# Sprites items/mobs/NPCs (+ manifest + alias-map)
 python3 tools/build_web_atlases.py --out tmp/web-assets
-# opcional: --domains items,mobs,npcs --client-dir /mnt/games/OzRo --limit 100
+# luego copiar tmp/web-assets/{items,mobs,npcs,manifest.json,alias-map.json}
+#   → ../ozro-site/assets/
+
+# Cartas
+python3 tools/build_card_book.py --out ../ozro-site/assets/cards
+
+# Mapas / farming / transport
+python3 tools/build_map_images.py --out ../ozro-site/assets/maps
+python3 tools/build_farming_data.py
+node tools/build_transport_map.mjs   # requiere deps de ozro-site (@linemap/core)
 ```
 
-Copia a `../ozro-site/assets/` (icons, illustrations, mobs/sprites, npcs/sprites,
-`manifest.json`, `alias-map.json`). Las cartas siguen en `tools/build_card_book.py`.
-
-Overrides PNG para modelos `.gr2`: `data/overrides/mobs/` (ver README ahí).
+Overrides PNG para modelos `.gr2`: `data/overrides/mobs/`.
 
 ## Enviar cambios
 
