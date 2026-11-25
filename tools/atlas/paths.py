@@ -20,6 +20,32 @@ def item_illustration_path(resource_name: str) -> str:
     return f"{UI_TEXTURE}/collection/{resource_name}.bmp"
 
 
+def skill_icon_path(resource_name: str) -> str:
+    """Skill icons live in the same UI item folder as item icons."""
+    return item_icon_path(resource_name)
+
+
+def map_minimap_candidates(map_stem: str) -> list[str]:
+    """Client minimap BMPs under UI texture/map (textured overview)."""
+    stem = map_stem.strip()
+    if not stem:
+        return []
+    # Prefer exact stem, then common p-prefix / lowercase variants.
+    stems = [stem, stem.lower()]
+    if not stem.startswith("p"):
+        stems.append(f"p{stem}")
+        stems.append(f"p{stem.lower()}")
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in stems:
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(f"{UI_TEXTURE}/map/{name}.bmp")
+    return out
+
+
 def mob_sprite_candidates(aegis_name: str, sprite_name: str | None) -> list[str]:
     base = aegis_name.lower()
     candidates: list[str] = []

@@ -20,16 +20,24 @@ fill in the gaps.
 - Roughly square; the builder fits them inside 160x160.
 - A tight crop of the entity looks best next to the 2D sprites.
 
-## Current 3D models to cover
+## Current 3D models
 
-One PNG per row covers all the listed mobs:
+One PNG per model covers every mob that shares that `.gr2`. Present overrides:
 
-| File to add | Entity | Model | Mobs covered |
-|-------------|--------|-------|--------------|
-| `1285.png`  | Archer Guardian  | `Aguardian90_8.gr2` | 4  |
-| `1286.png`  | Knight Guardian  | `Kguardian90_7.gr2` | 4  |
-| `1287.png`  | Soldier Guardian | `Sguardian90_9.gr2` | 1  |
-| `1288.png`  | Emperium         | `Empelium90_0.gr2`  | 2  |
-| `1324.png`  | Treasure Chest   | `TREASUREBOX_2.gr2` | 69 |
+| File | Entity | Model | Notes |
+|------|--------|-------|-------|
+| `1285.png` | Archer / Bow Guardian | `Aguardian90_8.gr2` | |
+| `1949.png` | Knight / Sword Guardian | `Kguardian90_7.gr2` | also covers 1286, 1829, 1899 |
+| `1287.png` | Soldier Guardian | `Sguardian90_9.gr2` | |
+| `1288.png` | Emperium | `Empelium90_0.gr2` | also Dream Metal 1846 |
+| `1903.png` | Treasure Chest | `TREASUREBOX_2.gr2` | many box ids |
+| `722.png` | Guild Flag | `Guildflag90_1.gr2` | |
 
-After adding the PNGs, run `npm run assets` from the `ozro-cli` root to rebuild.
+Still without override (left as miss → mob placeholder): Hugeling `1284`, Zombie Dragon `1181`.
+
+Rebuild:
+
+```bash
+python3 tools/build_web_atlases.py --domains mobs --out tmp/web-assets-mobs
+# then merge mobs/sprites + manifest/alias into ozro-site/assets
+```

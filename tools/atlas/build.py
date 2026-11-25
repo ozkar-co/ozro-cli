@@ -23,7 +23,9 @@ from .paths import (
     item_illustration_path,
     mob_sprite_candidates,
     npc_sprite_candidates,
+    skill_icon_path,
 )
+from .skillinfo import load_skill_entries
 from .spr import parse_spr
 
 
@@ -33,6 +35,7 @@ class BuildReport:
     grfs: list[str] = field(default_factory=list)
     items_icons: dict = field(default_factory=dict)
     items_illustrations: dict = field(default_factory=dict)
+    skills_icons: dict = field(default_factory=dict)
     mobs: dict = field(default_factory=dict)
     npcs: dict = field(default_factory=dict)
 
@@ -48,7 +51,7 @@ def build_web_atlases(
     limit: int | None = None,
     overrides_dir: Path | None = None,
 ) -> dict:
-    domains = domains or {"items", "mobs", "npcs"}
+    domains = domains or {"items", "mobs", "npcs", "skills"}
     out_dir.mkdir(parents=True, exist_ok=True)
 
     grf_paths = default_grf_paths(cli_root, client_dir)
@@ -62,13 +65,33 @@ def build_web_atlases(
         grfs=[p.name for p in grf_paths],
     )
     alias_maps: dict[str, dict] = {}
+    # Preserve sibling domains when rebuilding a subset into an existing out_dir.
+    existing_manifest: dict = {}
+    existing_alias: dict = {}
+    manifest_path = out_dir / "manifest.json"
+    alias_path = out_dir / "alias-map.json"
+    if manifest_path.is_file():
+        try:
+            existing_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            existing_manifest = {}
+    if alias_path.is_file():
+        try:
+            existing_alias = json.loads(alias_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            existing_alias = {}
+
     manifest: dict = {
         "version": 2,
         "generatedAt": report.generated_at,
-        "items": {"icons": {"pages": []}, "illustrations": {"pages": []}},
-        "mobs": {"sprites": {"pages": []}},
-        "npcs": {"sprites": {"pages": []}},
+        "items": existing_manifest.get("items")
+        or {"icons": {"pages": []}, "illustrations": {"pages": []}},
+        "skills": existing_manifest.get("skills") or {"icons": {"pages": []}},
+        "mobs": existing_manifest.get("mobs") or {"sprites": {"pages": []}},
+        "npcs": existing_manifest.get("npcs") or {"sprites": {"pages": []}},
     }
+    if isinstance(existing_alias, dict):
+        alias_maps.update(existing_alias)
 
     if "items" in domains:
         iteminfo = iteminfo_path or _find_iteminfo(cli_root, client_dir)
@@ -159,6 +182,71 @@ def build_web_atlases(
                 k: ids for k, ids in resource_alias.items() if len(ids) > 1
             },
             "id_to_resource": {str(i): e.resource_name for i, e in entries if e.resource_name},
+        }
+
+    if "skills" in domains:
+        print("Parsing skillid / skillinfolist…")
+        skills = load_skill_entries(stack)
+        if limit:
+            skills = skills[:limit]
+        print(f"  {len(skills)} skills to process")
+
+        icons_unique: dict[str, Image.Image] = {}
+        icons_id_to_key: dict[str, str] = {}
+        icon_ok = icon_miss = 0
+        resource_alias: dict[str, list[int]] = {}
+
+        for entry in skills:
+            resource = entry.resource_name
+            if not resource:
+                icon_miss += 1
+                continue
+            key = resource.lower()
+            resource_alias.setdefault(key, []).append(entry.skill_id)
+
+            if key not in icons_unique:
+                raw = stack.read(skill_icon_path(resource))
+                if not raw and resource != resource.lower():
+                    raw = stack.read(skill_icon_path(resource.lower()))
+                if raw:
+                    try:
+                        icons_unique[key] = normalize_icon(raw)
+                        icon_ok += 1
+                    except Exception:
+                        icon_miss += 1
+                else:
+                    icon_miss += 1
+            if key in icons_unique:
+                icons_id_to_key[str(entry.skill_id)] = key
+
+        print(
+            f"  skill icons: {len(icons_unique)} unique / {len(icons_id_to_key)} ids "
+            f"(decoded {icon_ok}, miss {icon_miss})"
+        )
+        skills_out = out_dir / "skills" / "icons"
+        if skills_out.is_dir():
+            for stale in skills_out.iterdir():
+                if stale.suffix.lower() in {".webp", ".json"}:
+                    stale.unlink()
+        icon_pages = pack_icon_atlases(
+            icons_unique, icons_id_to_key, skills_out
+        )
+        manifest["skills"]["icons"]["pages"] = [
+            _page_manifest(p, "skills/icons") for p in icon_pages
+        ]
+        report.skills_icons = {
+            "unique": len(icons_unique),
+            "ids": len(icons_id_to_key),
+            "miss": icon_miss,
+        }
+        alias_maps["skills"] = {
+            "by_resource": {
+                k: ids for k, ids in resource_alias.items() if len(ids) > 1
+            },
+            "id_to_resource": {
+                str(e.skill_id): e.resource_name for e in skills if e.resource_name
+            },
+            "id_to_aegis": {str(e.skill_id): e.aegis_name for e in skills},
         }
 
     if "mobs" in domains or "npcs" in domains:

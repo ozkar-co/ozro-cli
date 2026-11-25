@@ -7,7 +7,7 @@ Port of the old Node `tools/grf` asset builder, plus:
   - NPC sprites from the same identity+jobname path as mobs
 
 Examples:
-  python3 tools/build_web_atlases.py --domains items --limit 200
+  python3 tools/build_web_atlases.py --domains items,skills --limit 200
   python3 tools/build_web_atlases.py --out ../ozro-site/assets
   python3 tools/build_web_atlases.py --client-dir /mnt/games/OzRo
 """
@@ -47,8 +47,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--domains",
-        default="items,mobs,npcs",
-        help="Comma list: items,mobs,npcs",
+        default="items,mobs,npcs,skills",
+        help="Comma list: items,mobs,npcs,skills",
     )
     parser.add_argument("--limit", type=int, default=None, help="Debug: limit entries per domain")
     parser.add_argument(
