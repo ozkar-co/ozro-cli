@@ -118,8 +118,9 @@ classId
 - **Mobs:** cruce `mob_db` ↔ identity ↔ jobname ↔ spr/act|gr2 → `client_mob_server_gaps.jsonl`.
 - **NPCs (schema ≥6):** `client_npc_sprites.jsonl` lista solo stems **referenciados por jobname** (usables). Meta: `npc_sprites_files` / `npc_sprites_unwired` para lo suelto en GRF.
 - **NPCs (schema ≥8):** cada fila incluye `sprite_ids` (ints de `npcidentity`) y `jt_names` para join directo desde headers de script (`sprite_id` numérico).
+- **NPCs (schema ≥12):** cruce headers de scripts habilitados (`scripts_main.conf`) ↔ identity ↔ jobname ↔ spr/act|gr2 → `client_npc_server_gaps.jsonl`. Usa el índice **completo** de archivos NPC (incluye unwired) para distinguir “spr existe pero no cableado” de “spr ausente”.
 
-Reasons mob gap: `no_identity` | `no_jobname` | `missing_sprite`.
+Reasons mob/npc gap: `no_identity` | `no_jobname` | `missing_sprite` (+ NPC `unresolved_view` si el header no resuelve a un id de `npc.hpp`).
 
 ---
 
@@ -205,7 +206,7 @@ Salidas clave:
 | `client_maps.jsonl` | mapas + alias + complete |
 | `client_item_*.jsonl` | icons/sprites/itemInfo/server gaps |
 | `client_mob_*.jsonl` | sprites, server gaps, ACT wav gaps |
-| `client_npc_*.jsonl` | sprites **wired**, ACT wav gaps |
+| `client_npc_*.jsonl` | sprites **wired**, ACT wav gaps, server script-view gaps |
 | `client_skills.jsonl` | id, aegis, display/alt names, icon/sprite |
 | `client_skill_server_gaps.jsonl` | server skills missing client info/icon |
 | `client_statuses.jsonl` | EFST id, titles/desc, kind, icon path/source |

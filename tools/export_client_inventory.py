@@ -14,6 +14,7 @@ Reads data.ini priority (first wins). Writes reports under --out-dir:
   client_mob_act_gaps.jsonl      # mob ACT→wav refs missing from client stack
   client_npc_sprites.jsonl
   client_npc_act_gaps.jsonl      # npc ACT→wav refs missing from client stack
+  client_npc_server_gaps.jsonl   # enabled script views missing identity/jobname/sprite
   client_skills.jsonl            # skillid + skillinfolist + icon/sprite
   client_skill_server_gaps.jsonl # server skills missing client info/icon
   client_statuses.jsonl          # EFST ids + titles/desc + icon resolution
@@ -38,7 +39,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from grf import Grf, GrfError  # noqa: E402
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # ACT sound events store null-terminated filenames (may include spaces).
 _WAV_NULL_TERM_RE = re.compile(
@@ -72,6 +73,21 @@ JOBNAME_CANDIDATES = (
     "data/luafiles514/lua files/datainfo/jobname.lub",
     "data/lua files/datainfo/jobname.lub",
 )
+
+SERVER_NPC_SCRIPTS_MAIN = "npc/re/scripts_main.conf"
+
+# map,x,y,dir<TAB>type<TAB>Name<TAB>sprite...
+_NPC_HEADER_RE = re.compile(
+    r"^(?P<map>-|[A-Za-z0-9_@-]+),(?P<x>-?\d+),(?P<y>-?\d+),(?P<dir>\d+)\t"
+    r"(?P<type>script(?:\([^)]*\))?|shop|cashshop|itemshop|pointshop|"
+    r"marketshop|duplicate\([^)]+\))"
+    r"\t(?P<rest>.+)$"
+)
+_NPC_NAME_SPRITE_RE = re.compile(
+    r"^(?P<name>[^\t]+)\t(?P<sprite>[^\t,{]+)(?P<tail>.*)$"
+)
+_NPC_CONF_NPC_LINE = re.compile(r"^\s*npc:\s*(.+?)\s*$")
+_NPC_CONF_IMPORT_LINE = re.compile(r"^\s*import:\s*(.+?)\s*$")
 
 SKILLID_CANDIDATES = (
     "data/luafiles514/lua files/skillinfoz/skillid.lub",
@@ -893,6 +909,326 @@ def build_server_mob_gaps(
     return gaps
 
 
+def parse_job_type_enum(npc_hpp: Path) -> dict[str, int]:
+    """Parse e_job_types from npc.hpp → {JT_*: id}."""
+    text = npc_hpp.read_text(encoding="utf-8", errors="replace")
+    m = re.search(r"enum\s+e_job_types\s*\{", text)
+    if not m:
+        return {}
+    body = text[m.end() :]
+    end = body.find("};")
+    if end < 0:
+        return {}
+    body = body[:end]
+    out: dict[str, int] = {}
+    val: int | None = None
+    for raw in body.splitlines():
+        line = raw.split("//", 1)[0].strip().rstrip(",")
+        if not line:
+            continue
+        if "=" in line:
+            name, rhs = line.split("=", 1)
+            name = name.strip()
+            try:
+                val = int(rhs.strip(), 0)
+            except ValueError:
+                continue
+        else:
+            name = line
+            if val is None:
+                continue
+            val += 1
+        if name.startswith("JT_"):
+            out[name] = val
+    return out
+
+
+def _iter_enabled_conf_lines(path: Path) -> list[str]:
+    lines: list[str] = []
+    if not path.is_file():
+        return lines
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if raw.lstrip().startswith("//"):
+            continue
+        line = raw.split("//", 1)[0].rstrip()
+        if line.strip():
+            lines.append(line)
+    return lines
+
+
+def resolve_enabled_npc_scripts(
+    rathena: Path, scripts_main: str = SERVER_NPC_SCRIPTS_MAIN
+) -> list[str]:
+    """Recursively resolve enabled npc: scripts from scripts_main.conf."""
+    visited: set[str] = set()
+    scripts: list[str] = []
+
+    def walk(rel: str) -> None:
+        if rel in visited:
+            return
+        visited.add(rel)
+        path = rathena / rel
+        if not path.is_file():
+            return
+        for line in _iter_enabled_conf_lines(path):
+            m_npc = _NPC_CONF_NPC_LINE.match(line)
+            if m_npc:
+                scripts.append(m_npc.group(1).strip())
+                continue
+            m_imp = _NPC_CONF_IMPORT_LINE.match(line)
+            if m_imp:
+                walk(m_imp.group(1).strip())
+
+    walk(scripts_main)
+    return sorted({s for s in scripts if (rathena / s).is_file()})
+
+
+def _parse_npc_header_sprite(line: str) -> str | int | None:
+    m = _NPC_HEADER_RE.match(line)
+    if not m:
+        return None
+    rest_m = _NPC_NAME_SPRITE_RE.match(m.group("rest").strip())
+    if not rest_m:
+        return None
+    sprite = rest_m.group("sprite").strip()
+    tail = rest_m.group("tail") or ""
+    if not sprite or sprite == "-1":
+        return None
+    # Warp duplicates often omit sprite and only pass span: Name<TAB>xs,ys
+    # Our sprite token then captures xs; tail is ",ys". Skip those.
+    if re.fullmatch(r"-?\d+", sprite) and re.match(r"^,\d+", tail):
+        return None
+    if re.fullmatch(r"-?\d+", sprite):
+        return int(sprite)
+    return sprite
+
+
+def load_server_npc_views(
+    rathena: Path,
+    id_to_jt: dict[int, str] | None = None,
+) -> list[dict]:
+    """Unique sprite views referenced by enabled NPC script headers.
+
+    Resolves string views via npc.hpp e_job_types, client identity JT names,
+    and mob_db AegisName→Id (scripts often reuse mob sprites as NPC views).
+
+    Returns [{sprite_id, view_name, jt, script_count, sample_scripts}, ...].
+    """
+    hpp = rathena / "src" / "map" / "npc.hpp"
+    jt_to_id = parse_job_type_enum(hpp) if hpp.is_file() else {}
+    name_to_id: dict[str, int] = {}
+    for jt, sid in jt_to_id.items():
+        name_to_id[jt] = sid
+        if jt.startswith("JT_"):
+            name_to_id[jt[3:]] = sid
+    # Client identity covers mobs + NPCs in one table.
+    if id_to_jt:
+        for sid, jt in id_to_jt.items():
+            name_to_id.setdefault(jt, sid)
+            if jt.startswith("JT_"):
+                name_to_id.setdefault(jt[3:], sid)
+    # mob_db AegisName → Id (script constants for monster-as-NPC sprites).
+    for row in load_server_mobs(rathena):
+        aegis = (row.get("aegis_name") or "").strip()
+        if aegis:
+            name_to_id.setdefault(aegis, row["mob_id"])
+
+    id_to_jt_name = {sid: jt for jt, sid in jt_to_id.items()}
+    if id_to_jt:
+        for sid, jt in id_to_jt.items():
+            id_to_jt_name.setdefault(sid, jt)
+
+    scripts = resolve_enabled_npc_scripts(rathena)
+    by_id: dict[int, dict] = {}
+    unresolved: list[dict] = []
+
+    for rel in scripts:
+        path = rathena / rel
+        for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.split("//", 1)[0].rstrip()
+            if not line.strip():
+                continue
+            sprite = _parse_npc_header_sprite(line)
+            if sprite is None:
+                continue
+            if isinstance(sprite, int):
+                sid = sprite
+                jt = id_to_jt_name.get(sid)
+                view_name = jt[3:] if jt and jt.startswith("JT_") else None
+            else:
+                view_name = sprite
+                sid = name_to_id.get(sprite) or name_to_id.get(f"JT_{sprite}")
+                if sid is None:
+                    unresolved.append(
+                        {
+                            "sprite_id": None,
+                            "view_name": view_name,
+                            "jt": f"JT_{view_name}"
+                            if not str(view_name).startswith("JT_")
+                            else view_name,
+                            "script_count": 1,
+                            "sample_scripts": [rel],
+                            "unresolved": True,
+                        }
+                    )
+                    continue
+                jt = id_to_jt_name.get(sid) or (
+                    f"JT_{view_name}"
+                    if not str(view_name).startswith("JT_")
+                    else view_name
+                )
+            slot = by_id.setdefault(
+                sid,
+                {
+                    "sprite_id": sid,
+                    "view_name": view_name,
+                    "jt": jt
+                    or (
+                        f"JT_{view_name}"
+                        if view_name and not str(view_name).startswith("JT_")
+                        else view_name
+                    ),
+                    "scripts": set(),
+                },
+            )
+            if view_name and not slot.get("view_name"):
+                slot["view_name"] = view_name
+            if jt and not slot.get("jt"):
+                slot["jt"] = jt
+            slot["scripts"].add(rel)
+
+    rows: list[dict] = []
+    for sid, slot in sorted(by_id.items()):
+        scripts_sorted = sorted(slot["scripts"])
+        rows.append(
+            {
+                "sprite_id": sid,
+                "view_name": slot.get("view_name"),
+                "jt": slot.get("jt"),
+                "script_count": len(scripts_sorted),
+                "sample_scripts": scripts_sorted[:5],
+            }
+        )
+    seen_unres: dict[str, dict] = {}
+    for row in unresolved:
+        key = str(row.get("view_name") or "")
+        if key in seen_unres:
+            seen_unres[key]["script_count"] += 1
+            samples = seen_unres[key]["sample_scripts"]
+            for s in row["sample_scripts"]:
+                if s not in samples and len(samples) < 5:
+                    samples.append(s)
+        else:
+            seen_unres[key] = dict(row)
+    rows.extend(sorted(seen_unres.values(), key=lambda r: r.get("view_name") or ""))
+    return rows
+
+
+def build_server_npc_gaps(
+    server_views: list[dict],
+    id_to_jt: dict[int, str],
+    jt_to_spr: dict[str, str],
+    npc_sprites: list[dict],
+    mob_sprites: list[dict],
+    gr2_stems: set[str],
+) -> list[dict]:
+    """Gaps for script-referenced NPC views vs client identity/jobname/sprite.
+
+    Sprite lookup checks NPC folder (incl. unwired), mob folder, and .gr2 —
+    scripts often reuse monster sprites as NPC views.
+    """
+    spr_by = {r["sprite_stem"].lower(): r for r in mob_sprites}
+    spr_by.update({r["sprite_stem"].lower(): r for r in npc_sprites})
+    gaps: list[dict] = []
+    for row in server_views:
+        sid = row.get("sprite_id")
+        view_name = row.get("view_name")
+        jt_hint = row.get("jt")
+        script_count = row.get("script_count") or 0
+        sample_scripts = row.get("sample_scripts") or []
+
+        if sid is None or row.get("unresolved"):
+            gaps.append(
+                {
+                    "sprite_id": None,
+                    "view_name": view_name,
+                    "jt": jt_hint,
+                    "reason": "unresolved_view",
+                    "sprite_name": None,
+                    "sprite_kind": None,
+                    "has_sprite": False,
+                    "script_count": script_count,
+                    "sample_scripts": sample_scripts,
+                }
+            )
+            continue
+
+        jt = id_to_jt.get(int(sid))
+        if not jt:
+            stem_guess = None
+            if view_name:
+                stem_guess = str(view_name).lower()
+            elif jt_hint:
+                stem_guess = (
+                    str(jt_hint)[3:].lower()
+                    if str(jt_hint).startswith("JT_")
+                    else str(jt_hint).lower()
+                )
+            has_file = bool(
+                stem_guess and mob_sprite_complete(stem_guess, spr_by, gr2_stems)[0]
+            )
+            gaps.append(
+                {
+                    "sprite_id": int(sid),
+                    "view_name": view_name,
+                    "jt": jt_hint or jt,
+                    "reason": "no_identity",
+                    "sprite_name": stem_guess,
+                    "sprite_kind": "spr_act" if has_file else "missing",
+                    "has_sprite": has_file,
+                    "script_count": script_count,
+                    "sample_scripts": sample_scripts,
+                }
+            )
+            continue
+
+        spr = jt_to_spr.get(jt)
+        if not spr:
+            stem_guess = jt[3:].lower() if jt.startswith("JT_") else jt.lower()
+            has_file = mob_sprite_complete(stem_guess, spr_by, gr2_stems)[0]
+            gaps.append(
+                {
+                    "sprite_id": int(sid),
+                    "view_name": view_name,
+                    "jt": jt,
+                    "reason": "no_jobname",
+                    "sprite_name": stem_guess,
+                    "sprite_kind": "spr_act" if has_file else "missing",
+                    "has_sprite": has_file,
+                    "script_count": script_count,
+                    "sample_scripts": sample_scripts,
+                }
+            )
+            continue
+
+        ok, kind = mob_sprite_complete(spr, spr_by, gr2_stems)
+        if not ok:
+            gaps.append(
+                {
+                    "sprite_id": int(sid),
+                    "view_name": view_name,
+                    "jt": jt,
+                    "reason": "missing_sprite",
+                    "sprite_name": spr,
+                    "sprite_kind": kind,
+                    "has_sprite": False,
+                    "script_count": script_count,
+                    "sample_scripts": sample_scripts,
+                }
+            )
+    return gaps
+
+
 def parse_skillid(data: bytes) -> dict[str, int]:
     """SKID name → numeric id from skillid.lub."""
     text = data.decode("utf-8", errors="replace")
@@ -1655,6 +1991,8 @@ def main() -> int:
         server_ids: list[int] = []
         server_mobs: list[dict] = []
         mob_gaps: list[dict] = []
+        server_npc_views: list[dict] = []
+        npc_gaps: list[dict] = []
         server_skills: list[dict] = []
         skill_gaps: list[dict] = []
         server_statuses: list[dict] = []
@@ -1666,6 +2004,20 @@ def main() -> int:
             server_mobs = load_server_mobs(rathena)
             mob_gaps = build_server_mob_gaps(
                 server_mobs, id_to_jt, jt_to_spr, mob_spr, gr2_stems
+            )
+            print("scanning enabled NPC script views…", flush=True)
+            server_npc_views = load_server_npc_views(rathena, id_to_jt)
+            npc_gaps = build_server_npc_gaps(
+                server_npc_views,
+                id_to_jt,
+                jt_to_spr,
+                npc_spr_all,
+                mob_spr,
+                gr2_stems,
+            )
+            print(
+                f"  npc_views={len(server_npc_views)} npc_gaps={len(npc_gaps)}",
+                flush=True,
             )
             server_skills = load_server_skills(rathena)
             skills = enrich_skills_with_server(skills, server_skills)
@@ -1692,6 +2044,8 @@ def main() -> int:
             write_jsonl(out_dir / "client_item_server_gaps.jsonl", server_gaps)
         if mob_gaps or server_mobs:
             write_jsonl(out_dir / "client_mob_server_gaps.jsonl", mob_gaps)
+        if npc_gaps or server_npc_views:
+            write_jsonl(out_dir / "client_npc_server_gaps.jsonl", npc_gaps)
         if skill_gaps or server_skills:
             write_jsonl(out_dir / "client_skill_server_gaps.jsonl", skill_gaps)
         if status_gaps or server_statuses:
@@ -1774,7 +2128,13 @@ def main() -> int:
             "grfs": grf_meta,
             "active_path_count": len(active),
             "rathena": str(rathena)
-            if (server_ids or server_mobs or server_skills or server_statuses)
+            if (
+                server_ids
+                or server_mobs
+                or server_npc_views
+                or server_skills
+                or server_statuses
+            )
             else None,
             "counts": {
                 "maps": len(maps),
@@ -1823,6 +2183,23 @@ def main() -> int:
                 "npcs_act_wav_missing_unique": len(
                     {g["wav"] for g in npc_act_gaps}
                 ),
+                "npcs_server": len(server_npc_views),
+                "npcs_server_ok": len(server_npc_views) - len(npc_gaps),
+                "npcs_no_identity": sum(
+                    1 for g in npc_gaps if g["reason"] == "no_identity"
+                ),
+                "npcs_no_jobname": sum(
+                    1 for g in npc_gaps if g["reason"] == "no_jobname"
+                ),
+                "npcs_missing_sprite": sum(
+                    1 for g in npc_gaps if g["reason"] == "missing_sprite"
+                ),
+                "npcs_unresolved_view": sum(
+                    1 for g in npc_gaps if g["reason"] == "unresolved_view"
+                ),
+                "npcs_gap_has_sprite_file": sum(
+                    1 for g in npc_gaps if g.get("has_sprite")
+                ),
                 "skills": len(skills),
                 "skills_with_skillinfo": skills_with_info,
                 "skills_with_display_name": skills_with_display,
@@ -1859,6 +2236,7 @@ def main() -> int:
                 "client_mob_server_gaps.jsonl" if server_mobs else None,
                 "client_npc_sprites.jsonl",
                 "client_npc_act_gaps.jsonl",
+                "client_npc_server_gaps.jsonl" if server_npc_views else None,
                 "client_skills.jsonl",
                 "client_skill_server_gaps.jsonl" if server_skills else None,
                 "client_statuses.jsonl",
